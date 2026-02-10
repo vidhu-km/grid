@@ -470,18 +470,28 @@ units_display = units_gdf.copy().to_crs(4326)
 existing_display = analog_wells[["UWI", "geometry"]].copy().to_crs(4326)
 
 # --------------------------------------------------
-# Map
+# MAP SECTION – full updated version (Option A)
 # --------------------------------------------------
 st.title("Bakken Prospect Analyzer")
 col_map, col_rank = st.columns([8, 3])
 
 with col_map:
-    bounds = p_display.total_bounds
-    center = [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]
-    m = folium.Map(location=center, zoom_start=11, tiles="CartoDB positron")
+    # ---- 1️⃣  Compute map centre & create base map -----------------
+    bounds = p_display.total_bounds                     # [xmin, ymin, xmax, ymax]
+    centre = [(bounds[1] + bounds[3]) / 2,
+              (bounds[0] + bounds[2]) / 2]               # [lat, lng]
 
-    # --- Section grid layer ---
+    m = folium.Map(
+        location=centre,
+        zoom_start=11,
+        tiles="CartoDB positron"
+    )
+
+    # --------------------------------------------------
+    # 2️⃣ SECTION GRID (colour‑gradient optional)
+    # --------------------------------------------------
     if section_gradient == "OOIP":
+        # Build a colour map only if we have OOIP values
         ooip_vals = section_display["OOIP"].dropna()
         if not ooip_vals.empty:
             colormap = cm.LinearColormap(
@@ -489,87 +499,108 @@ with col_map:
                 vmin=ooip_vals.min(),
                 vmax=ooip_vals.max(),
             ).to_step(n=7)
-            colormap.caption = "OOIP"
+            colormap.caption = "OOIP (bbl)"
             m.add_child(colormap)
 
-            def section_style(f):
-                v = f["properties"].get("OOIP")
-                if v is None or (isinstance(v, float) and pd.isna(v)):
+            def section_style(feature):
+                val = feature["properties"].get("OOIP")
+                if val is None or pd.isna(val):
                     return NULL_STYLE
                 return {
-                    "fillColor": colormap(v),
+                    "fillColor": colormap(val),
                     "fillOpacity": 0.5,
                     "color": "white",
                     "weight": 0.3,
                 }
         else:
+            # fallback – no OOIP data
             section_style = lambda f: NULL_STYLE
     else:
         section_style = lambda f: NULL_STYLE
-
-    section_tooltip_fields = ["Section", "OOIP", "RFTD", "URF"]
-    section_tooltip_aliases = ["Section:", "OOIP:", "RFTD:", "URF:"]
-
-    # --- Units layer ---
-    folium.GeoJson(
-        units_display.to_json(),
-        name="Units",
-        style_function=lambda _: {"color": "black", "weight": 2, "fillOpacity": 0},
-    ).add_to(m)
 
     folium.GeoJson(
         section_display.to_json(),
         name="Section Grid",
         style_function=section_style,
-        highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.6},
+        highlight_function=lambda _: {
+            "weight": 2,
+            "color": "black",
+            "fillOpacity": 0.6,
+        },
         tooltip=folium.GeoJsonTooltip(
-            fields=section_tooltip_fields,
-            aliases=section_tooltip_aliases,
+            fields=["Section", "OOIP", "RFTD", "URF"],
+            aliases=["Section:", "OOIP:", "RFTD:", "URF:"],
             localize=True,
             sticky=True,
         ),
     ).add_to(m)
 
-    
+    # --------------------------------------------------
+    # 3️⃣ UNITS – put them in a low‑z‑index pane so they don’t
+    #     capture mouse events (pre‑vents tooltip hiding)
+    # --------------------------------------------------
+    units_pane = folium.map.Pane('units', z_index=400)   # default overlay ≈ 450‑500
+    m.add_child(units_pane)
 
-    # --- Existing wells ---
     folium.GeoJson(
-        existing_display.to_json(),
-        name="Existing Wells",
+        units_display.to_json(),
+        name="Units",
+        pane='units',
+        style_function=lambda _: {
+            "color": "black",
+            "weight": 2,
+            "fillOpacity": 0,          # invisible fill
+            "interactive": False,      # click‑through
+        },
+    ).add_to(m)
+
+    # --------------------------------------------------
+    # 4️⃣ EXISTING WELLS – points become CircleMarkers
+    # --------------------------------------------------
+    # Separate point‑type and line‑type geometries
+    point_wells = existing_display[
+        existing_display.geometry.type == "Point"
+    ]
+    line_wells = existing_display[
+        existing_display.geometry.type != "Point"
+    ]
+
+    # ---- 4a)  Draw well lines (unchanged) -----------------------
+    folium.GeoJson(
+        line_wells.to_json(),
+        name="Existing Well Lines",
         style_function=lambda _: {"color": "red", "weight": 0.5},
     ).add_to(m)
 
-    # --- Prospect wells ---
-    NO_ANALOG_STYLE = {
-        "color": "orange",
-        "weight": 3,
-        "dashArray": "5 5",
-    }
-    PASSING_STYLE = {
-        "color": "#2196F3",
-        "weight": 3,
-    }
-    FAILING_STYLE = {
-        "color": "#d3d3d3",
-        "weight": 2,
-    }
+    # ---- 4b)  Draw well points as CircleMarkers ---------------
+    for _, row in point_wells.iterrows():
+        # You can customise radius / colour based on any column here
+        tooltip = folium.Tooltip(f"UWI: {row.get('UWI', '‑')}")
+        folium.CircleMarker(
+            location=[row.geometry.y, row.geometry.x],
+            radius=5,                     # pixel radius – adjust as you like
+            color="red",
+            fill=True,
+            fill_color="red",
+            fill_opacity=0.8,
+            weight=1,
+            tooltip=tooltip,
+        ).add_to(m)
 
-    def prospect_style(f):
-        props = f["properties"]
+    # --------------------------------------------------
+    # 5️⃣ PROSPECTS – add **after** units & wells so they sit on top
+    # --------------------------------------------------
+    NO_ANALOG_STYLE = {"color": "orange", "weight": 3, "dashArray": "5 5"}
+    PASSING_STYLE   = {"color": "#2196F3", "weight": 3}
+    FAILING_STYLE   = {"color": "#d3d3d3", "weight": 2}
+
+    def prospect_style(feature):
+        props = feature["properties"]
         if props.get("_no_analogs", False):
             return NO_ANALOG_STYLE
         if not props.get("_passes_filter", True):
             return FAILING_STYLE
         return PASSING_STYLE
-
-    prospect_tooltip_fields = [
-        "Label", "_prospect_type", "Analog_Count",
-        "EUR", "IP90", "1YCuml", "Wcut",
-    ]
-    prospect_tooltip_aliases = [
-        "Prospect:", "Type:", "Analog Count:",
-        "Avg EUR:", "Avg IP90:", "Avg 1Y Cuml:", "Avg Wcut:",
-    ]
 
     folium.GeoJson(
         p_display.to_json(),
@@ -584,8 +615,18 @@ with col_map:
         ),
     ).add_to(m)
 
+    # --------------------------------------------------
+    # 6️⃣ LAYER CONTROL & render
+    # --------------------------------------------------
     folium.LayerControl(collapsed=True).add_to(m)
-    st_folium(m, use_container_width=True, height=900, returned_objects=[])
+
+    # Render the map inside Streamlit
+    st_folium(
+        m,
+        use_container_width=True,
+        height=900,
+        returned_objects=[],
+    )
 
 # --------------------------------------------------
 # Ranking Table
