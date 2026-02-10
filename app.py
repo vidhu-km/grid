@@ -470,13 +470,15 @@ units_display = units_gdf.copy().to_crs(4326)
 existing_display = analog_wells[["UWI", "geometry"]].copy().to_crs(4326)
 
 # --------------------------------------------------
-# MAP SECTION – full updated version (Option A)
+# MAP SECTION – updated (points as circles, units non‑blocking)
 # --------------------------------------------------
 st.title("Bakken Prospect Analyzer")
 col_map, col_rank = st.columns([8, 3])
 
 with col_map:
-    # ---- 1️⃣  Compute map centre & create base map -----------------
+    # --------------------------------------------------
+    # 1️⃣  Initialise the base Folium map
+    # --------------------------------------------------
     bounds = p_display.total_bounds                     # [xmin, ymin, xmax, ymax]
     centre = [(bounds[1] + bounds[3]) / 2,
               (bounds[0] + bounds[2]) / 2]               # [lat, lng]
@@ -488,10 +490,9 @@ with col_map:
     )
 
     # --------------------------------------------------
-    # 2️⃣ SECTION GRID (colour‑gradient optional)
+    # 2️⃣  SECTION GRID (optional colour gradient)
     # --------------------------------------------------
     if section_gradient == "OOIP":
-        # Build a colour map only if we have OOIP values
         ooip_vals = section_display["OOIP"].dropna()
         if not ooip_vals.empty:
             colormap = cm.LinearColormap(
@@ -513,7 +514,6 @@ with col_map:
                     "weight": 0.3,
                 }
         else:
-            # fallback – no OOIP data
             section_style = lambda f: NULL_STYLE
     else:
         section_style = lambda f: NULL_STYLE
@@ -536,26 +536,21 @@ with col_map:
     ).add_to(m)
 
     # --------------------------------------------------
-    # 3️⃣ UNITS – put them in a low‑z‑index pane so they don’t
-    #     capture mouse events (pre‑vents tooltip hiding)
+    # 3️⃣  UNITS – drawn *first* and made non‑interactive
     # --------------------------------------------------
-    units_pane = folium.map.Pane('units', z_index=400)   # default overlay ≈ 450‑500
-    m.add_child(units_pane)
-
     folium.GeoJson(
         units_display.to_json(),
         name="Units",
-        pane='units',
         style_function=lambda _: {
             "color": "black",
             "weight": 2,
             "fillOpacity": 0,          # invisible fill
-            "interactive": False,      # click‑through
+            "interactive": False,      # prevents the layer from capturing mouse events
         },
     ).add_to(m)
 
     # --------------------------------------------------
-    # 4️⃣ EXISTING WELLS – points become CircleMarkers
+    # 4️⃣  EXISTING WELLS – points become CircleMarkers (Option A)
     # --------------------------------------------------
     # Separate point‑type and line‑type geometries
     point_wells = existing_display[
@@ -588,7 +583,7 @@ with col_map:
         ).add_to(m)
 
     # --------------------------------------------------
-    # 5️⃣ PROSPECTS – add **after** units & wells so they sit on top
+    # 5️⃣  PROSPECTS – added *after* units & wells so they sit on top
     # --------------------------------------------------
     NO_ANALOG_STYLE = {"color": "orange", "weight": 3, "dashArray": "5 5"}
     PASSING_STYLE   = {"color": "#2196F3", "weight": 3}
@@ -616,11 +611,10 @@ with col_map:
     ).add_to(m)
 
     # --------------------------------------------------
-    # 6️⃣ LAYER CONTROL & render
+    # 6️⃣  LAYER CONTROL & render the map in Streamlit
     # --------------------------------------------------
     folium.LayerControl(collapsed=True).add_to(m)
 
-    # Render the map inside Streamlit
     st_folium(
         m,
         use_container_width=True,
