@@ -536,7 +536,7 @@ with col_map:
     ).add_to(m)
 
     # --------------------------------------------------
-    # 3️⃣  UNITS – drawn *first* and made non‑interactive
+    # 3️⃣  UNITS – drawn first and made non‑interactive
     # --------------------------------------------------
     folium.GeoJson(
         units_display.to_json(),
@@ -583,11 +583,21 @@ with col_map:
         ).add_to(m)
 
     # --------------------------------------------------
-    # 5️⃣  PROSPECTS – added *after* units & wells so they sit on top
+    # 5️⃣  PROSPECTS – added after units & wells so they sit on top
     # --------------------------------------------------
+    # Define the tooltip field lists locally (prevents NameError)
+    prospect_tooltip_fields = [
+        "Label", "_prospect_type", "Analog_Count",
+        "EUR", "IP90", "1YCuml", "Wcut",
+    ]
+    prospect_tooltip_aliases = [
+        "Prospect:", "Type:", "Analog Count:",
+        "Avg EUR:", "Avg IP90:", "Avg 1Y Cuml:", "Avg Wcut:",
+    ]
+
     NO_ANALOG_STYLE = {"color": "orange", "weight": 3, "dashArray": "5 5"}
     PASSING_STYLE   = {"color": "#2196F3", "weight": 3}
-    FAILING_STYLE   = {"color": "#d3d3d3", "weight": 2}
+    FAILING_STYLE   = {"color": "#d3d3d0", "weight": 2}
 
     def prospect_style(feature):
         props = feature["properties"]
