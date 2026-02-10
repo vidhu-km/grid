@@ -10,3 +10,4 @@ pyproj>=3.6
 fiona>=1.9
 pydeck
 matplotlib
+plotly
