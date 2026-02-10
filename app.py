@@ -510,6 +510,13 @@ with col_map:
     section_tooltip_fields = ["Section", "OOIP", "RFTD", "URF"]
     section_tooltip_aliases = ["Section:", "OOIP:", "RFTD:", "URF:"]
 
+    # --- Units layer ---
+    folium.GeoJson(
+        units_display.to_json(),
+        name="Units",
+        style_function=lambda _: {"color": "black", "weight": 2, "fillOpacity": 0},
+    ).add_to(m)
+
     folium.GeoJson(
         section_display.to_json(),
         name="Section Grid",
@@ -523,12 +530,7 @@ with col_map:
         ),
     ).add_to(m)
 
-    # --- Units layer ---
-    folium.GeoJson(
-        units_display.to_json(),
-        name="Units",
-        style_function=lambda _: {"color": "black", "weight": 2, "fillOpacity": 0},
-    ).add_to(m)
+    
 
     # --- Existing wells ---
     folium.GeoJson(
