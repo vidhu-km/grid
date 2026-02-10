@@ -550,37 +550,36 @@ with col_map:
     ).add_to(m)
 
     # --------------------------------------------------
-    # 4️⃣  EXISTING WELLS – points become CircleMarkers (Option A)
+    # 4️⃣  EXISTING WELLS – points become CircleMarkers (fixed)
     # --------------------------------------------------
-    # Separate point‑type and line‑type geometries
     point_wells = existing_display[
-        existing_display.geometry.type == "Point"
+    existing_display.geometry.type == "Point"
     ]
     line_wells = existing_display[
         existing_display.geometry.type != "Point"
     ]
 
-    # ---- 4a)  Draw well lines (unchanged) -----------------------
-    folium.GeoJson(
-        line_wells.to_json(),
-        name="Existing Well Lines",
-        style_function=lambda _: {"color": "red", "weight": 0.5},
-    ).add_to(m)
+# ---- 4a)  Draw well lines (unchanged) -----------------------
+folium.GeoJson(
+    line_wells.to_json(),
+    name="Existing Well Lines",
+    style_function=lambda _: {"color": "red", "weight": 0.5},
+).add_to(m)
 
-    # ---- 4b)  Draw well points as CircleMarkers ---------------
-    for _, row in point_wells.iterrows():
-        # You can customise radius / colour based on any column here
-        tooltip = folium.Tooltip(f"UWI: {row.get('UWI', '‑')}")
-        folium.CircleMarker(
-            location=[row.geometry.y, row.geometry.x],
-            radius=5,                     # pixel radius – adjust as you like
-            color="red",
-            fill=True,
-            fill_color="red",
-            fill_opacity=0.8,
-            weight=1,
-            tooltip=tooltip,
-        ).add_to(m)
+# ---- 4b)  Draw well points as CircleMarkers (fixed) -------
+for _, row in point_wells.iterrows():
+    tip_text = f"UWI: {row.get('UWI', '‑')}"
+    folium.CircleMarker(
+        location=[row.geometry.y, row.geometry.x],
+        radius=5,
+        color="red",
+        fill=True,
+        fill_color="red",
+        fill_opacity=0.8,
+        weight=1,
+        interactive=True,                     # ← enable mouse events
+        tooltip=folium.Tooltip(tip_text, sticky=True),  # ← sticky tooltip
+    ).add_to(m)
 
     # --------------------------------------------------
     # 5️⃣  PROSPECTS – added after units & wells so they sit on top
