@@ -42,9 +42,9 @@ def load_data():
     lines = gpd.read_file("lines.shp")
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
-    units = gpd.read_file("Bakken Units.shp")
     infills = gpd.read_file("2M_Infills_plyln.shp")
     lease_lines = gpd.read_file("2M_LL_plyln.shp")
+    units = gpd.read_file("Bakken Units.shp")
 
     prod_in = pd.read_excel("well.xlsx", sheet_name="inunit")
     prod_out = pd.read_excel("well.xlsx", sheet_name="outunit")
