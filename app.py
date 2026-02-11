@@ -345,7 +345,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         geom_intersects = prox.geometry.intersects(buffer_geom)
 
         # Union of both criteria: midpoint within buffer OR geometry intersects buffer
-        combined_mask = within_buffer | geom_intersects
+        combined_mask = within_buffer
         hits = prox[combined_mask].copy()
         hit_dists = dists[combined_mask]
 
