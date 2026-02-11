@@ -139,10 +139,9 @@ st.sidebar.title("Map Settings")
 st.sidebar.subheader("⚙️ Analysis Mode")
 analysis_mode = st.sidebar.radio(
     "Mode",
-    ["Prospect Analysis", "Section Explorer"],
+    ["Prospect Analysis"],
     index=0,
 )
-is_section_mode = analysis_mode == "Section Explorer"
 
 # ==========================================================
 # Sidebar — proximal Well Source
