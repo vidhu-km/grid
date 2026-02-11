@@ -763,7 +763,7 @@ with col_map:
 
         if not grad_vals.empty:
             colors = (["#006837", "#78c679", "#ffffcc"] if lower_is_better
-                      else ["#ffffcc", "#78c679", "#006837"])
+                      else ["#f7fcf5", "#74c476", "#00441b"])
             colormap = cm.LinearColormap(
                 colors=colors,
                 vmin=float(grad_vals.min()),
@@ -812,7 +812,7 @@ with col_map:
     # Layer 3: Buffers
     green_cmap = cm.LinearColormap(
         colors=["#f7fcf5", "#74c476", "#00441b"],
-        vmin=0, vmax=1,
+        vmin=0.2, vmax=1,
     )
 
     buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
