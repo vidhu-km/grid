@@ -153,14 +153,6 @@ show_out_unit = st.sidebar.checkbox("Out-of-Unit Wells", value=False)
 if not show_in_unit and not show_out_unit:
     st.sidebar.error("Select at least one well source.")
     st.stop()
-
-if not is_section_mode:
-    st.sidebar.subheader("🎯 Prospect Type")
-    show_infills = st.sidebar.checkbox("2M Infills", value=True)
-    show_lease_lines = st.sidebar.checkbox("2M Lease Lines", value=False)
-    if not show_infills and not show_lease_lines:
-        st.sidebar.error("Select at least one prospect type.")
-        st.stop()
 else:
     show_infills = True
     show_lease_lines = True
