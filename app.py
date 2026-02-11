@@ -83,15 +83,15 @@ def confidence_tier(count):
 
 @st.cache_resource(show_spinner="Loading spatial data …")
 def load_data():
-    lines = gpd.read_file(`lines.shp`)
-    points = gpd.read_file(`points.shp`)
-    grid = gpd.read_file(`ooipsectiongrid.shp`)
-    infills = gpd.read_file(`2M_Infills_plyln.shp`)
-    lease_lines = gpd.read_file(`2M_LL_plyln.shp`)
-    units = gpd.read_file(`Bakken Units.shp`)
+    lines = gpd.read_file('lines.shp')
+    points = gpd.read_file('points.shp')
+    grid = gpd.read_file('ooipsectiongrid.shp')
+    infills = gpd.read_file('2M_Infills_plyln.shp')
+    lease_lines = gpd.read_file('2M_LL_plyln.shp')
+    units = gpd.read_file('Bakken Units.shp')
 
-    prod_in = pd.read_excel(`well.xlsx`, sheet_name="inunit")
-    prod_out = pd.read_excel(`well.xlsx`, sheet_name="outunit")
+    prod_in = pd.read_excel('well.xlsx', sheet_name="inunit")
+    prod_out = pd.read_excel('well.xlsx', sheet_name="outunit")
 
     all_gdfs = [lines, points, grid, units, infills, lease_lines]
     for gdf in all_gdfs:
