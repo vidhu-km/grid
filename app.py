@@ -812,7 +812,7 @@ with col_map:
     # Layer 3: Buffers
     green_cmap = cm.LinearColormap(
         colors=["#f7fcf5", "#74c476", "#00441b"],
-        vmin=0.2, vmax=1,
+        vmin=0, vmax=1,
     )
 
     buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
