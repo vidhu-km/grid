@@ -333,21 +333,24 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         else:
             record["_section_label"] = "Unknown"
 
-        # Buffer — find proximal wells by distance from midpoints
-        # This avoids spatial join issues with line geometries
-        pmx = prospect_mid.x
-        pmy = prospect_mid.y
-        dists = np.sqrt((prox_mid_x - pmx) ** 2 + (prox_mid_y - pmy) ** 2)
-        within_buffer = dists <= _buffer_m
-
-        # Also check if the well geometry itself intersects the buffer
+        # 1. Create the buffer around the entire prospect line
         buffer_geom = geom.buffer(_buffer_m)
-        geom_intersects = prox.geometry.intersects(buffer_geom)
 
-        # Union of both criteria: midpoint within buffer OR geometry intersects buffer
-        combined_mask = within_buffer
-        hits = prox[combined_mask].copy()
-        hit_dists = dists[combined_mask]
+        # 2. Check which proximal well midpoints fall inside that buffer
+        midpoint_mask = prox["_midpoint"].apply(
+            lambda mp: buffer_geom.contains(mp) if mp is not None else False
+        )
+        
+        hits = prox[midpoint_mask].copy()
+
+        # 3. Recalculate distances for the IDW weighting (Prospect Mid to Well Mid)
+        if not hits.empty:
+            pmx, pmy = prospect_mid.x, prospect_mid.y
+            hit_mids_x = hits["_midpoint"].apply(lambda m: m.x)
+            hit_mids_y = hits["_midpoint"].apply(lambda m: m.y)
+            hit_dists = np.sqrt((hit_mids_x - pmx)**2 + (hit_mids_y - pmy)**2)
+        else:
+            hit_dists = pd.Series(dtype=float)
 
         record["Proximal_Count"] = len(hits)
         record["_proximal_uwis"] = ",".join(hits["UWI"].tolist()) if len(hits) > 0 else ""
