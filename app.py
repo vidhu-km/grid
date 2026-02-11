@@ -139,9 +139,10 @@ st.sidebar.title("Map Settings")
 st.sidebar.subheader("⚙️ Analysis Mode")
 analysis_mode = st.sidebar.radio(
     "Mode",
-    ["Prospect Analysis"],
+    ["Prospect Analysis", "Section Explorer"],
     index=0,
 )
+is_section_mode = analysis_mode == "Section Explorer"
 
 # ==========================================================
 # Sidebar — proximal Well Source
@@ -153,6 +154,14 @@ show_out_unit = st.sidebar.checkbox("Out-of-Unit Wells", value=False)
 if not show_in_unit and not show_out_unit:
     st.sidebar.error("Select at least one well source.")
     st.stop()
+
+if not is_section_mode:
+    st.sidebar.subheader("🎯 Prospect Type")
+    show_infills = st.sidebar.checkbox("2M Infills", value=True)
+    show_lease_lines = st.sidebar.checkbox("2M Lease Lines", value=False)
+    if not show_infills and not show_lease_lines:
+        st.sidebar.error("Select at least one prospect type.")
+        st.stop()
 else:
     show_infills = True
     show_lease_lines = True
@@ -253,13 +262,182 @@ def compute_section_metrics(_proximal_wells, _grid_df):
 
     return g
 
+
 section_enriched = compute_section_metrics(proximal_wells, grid_gdf)
+
+
+# ==========================================================
+# SECTION EXPLORER MODE
+# ==========================================================
+if is_section_mode:
+
+    st.title("🗺️ Bakken Section Explorer")
+    st.caption("Browse section-level data. Switch to **Prospect Analysis** for drilling recommendations.")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🗺️ Section Grid Gradient")
+    GRADIENT_OPTIONS = ["None", "OOIP", "Avg EUR", "Avg IP90", "Avg 1YCuml",
+                        "Avg Wcut", "Section Cuml", "RFTD", "URF"]
+    GRADIENT_COL_MAP = {
+        "OOIP": "OOIP", "Avg EUR": "Avg_EUR", "Avg IP90": "Avg_IP90",
+        "Avg 1YCuml": "Avg_1YCuml", "Avg Wcut": "Avg_Wcut",
+        "Section Cuml": "Section_Cuml", "RFTD": "RFTD", "URF": "URF",
+    }
+    section_gradient = st.sidebar.selectbox("Colour sections by", GRADIENT_OPTIONS, key="se_grad")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("🔍 Section Filters")
+
+    s = section_enriched.copy()
+
+    _ooip_lo, _ooip_hi = safe_range(s["OOIP"])
+    f_ooip = st.sidebar.slider("Min OOIP", _ooip_lo, _ooip_hi, _ooip_lo, step=1.0, format="%.0f", key="se_ooip")
+
+    _eur_lo, _eur_hi = safe_range(s["Avg_EUR"])
+    f_eur = st.sidebar.slider("Min Avg EUR", _eur_lo, _eur_hi, _eur_lo, step=1.0, format="%.0f", key="se_eur")
+
+    _ip90_lo, _ip90_hi = safe_range(s["Avg_IP90"])
+    f_ip90 = st.sidebar.slider("Min Avg IP90", _ip90_lo, _ip90_hi, _ip90_lo, step=1.0, format="%.0f", key="se_ip90")
+
+    _1y_lo, _1y_hi = safe_range(s["Avg_1YCuml"])
+    f_1y = st.sidebar.slider("Min Avg 1Y Cuml", _1y_lo, _1y_hi, _1y_lo, step=1.0, format="%.0f", key="se_1y")
+
+    _wcut_lo, _wcut_hi = safe_range(s["Avg_Wcut"])
+    f_wcut = st.sidebar.slider("Max Avg Wcut", _wcut_lo, _wcut_hi, _wcut_hi, step=1.0, key="se_wcut")
+
+    _urf_lo, _urf_hi = safe_range(s["URF"])
+    f_urf = st.sidebar.slider("Max URF", _urf_lo, _urf_hi, _urf_hi, step=0.01, format="%.2f", key="se_urf")
+
+    _rftd_lo, _rftd_hi = safe_range(s["RFTD"])
+    f_rftd = st.sidebar.slider("Max RFTD", _rftd_lo, _rftd_hi, _rftd_hi, step=0.01, format="%.2f", key="se_rftd")
+
+    has_wells = s["Well_Count"].fillna(0) > 0
+    passes = (
+        has_wells
+        & ((s["OOIP"] >= f_ooip) | s["OOIP"].isna())
+        & ((s["Avg_EUR"] >= f_eur) | s["Avg_EUR"].isna())
+        & ((s["Avg_IP90"] >= f_ip90) | s["Avg_IP90"].isna())
+        & ((s["Avg_1YCuml"] >= f_1y) | s["Avg_1YCuml"].isna())
+        & ((s["Avg_Wcut"] <= f_wcut) | s["Avg_Wcut"].isna())
+        & ((s["URF"] <= f_urf) | s["URF"].isna())
+        & ((s["RFTD"] <= f_rftd) | s["RFTD"].isna())
+    )
+    s["_passes"] = passes
+    n_pass = int(passes.sum())
+    n_with_wells = int(has_wells.sum())
+    st.sidebar.markdown(f"**{n_pass}** / {n_with_wells} sections with wells pass filters")
+
+    # ---- Map ----
+    s_display = s.copy().to_crs(4326)
+    units_display = units_gdf.copy().to_crs(4326)
+
+    existing_display_cols = ["UWI", "geometry"] + [
+        c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in proximal_wells.columns
+    ]
+    existing_display = proximal_wells[existing_display_cols].copy().to_crs(4326)
+
+    bounds = s_display.total_bounds
+    centre = [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]
+    m = folium.Map(location=centre, zoom_start=11, tiles="CartoDB positron")
+    MiniMap(toggle_display=True, position="bottomleft").add_to(m)
+
+    if section_gradient != "None":
+        grad_col = GRADIENT_COL_MAP[section_gradient]
+        grad_vals = s_display[grad_col].dropna()
+        lower_is_better = section_gradient in ["Avg Wcut", "RFTD", "URF"]
+
+        if not grad_vals.empty:
+            colors = (["#006837", "#78c679", "#ffffcc"] if lower_is_better
+                      else ["#ffffcc", "#78c679", "#006837"])
+            colormap = cm.LinearColormap(
+                colors=colors,
+                vmin=float(grad_vals.min()),
+                vmax=float(grad_vals.max()),
+            ).to_step(n=7)
+            colormap.caption = section_gradient
+            m.add_child(colormap)
+
+            def section_style(feature):
+                val = feature["properties"].get(grad_col)
+                if val is None or (isinstance(val, float) and np.isnan(val)):
+                    return NULL_STYLE
+                return {"fillColor": colormap(val), "fillOpacity": 0.55,
+                        "color": "white", "weight": 0.3}
+        else:
+            section_style = lambda _: NULL_STYLE
+    else:
+        section_style = lambda _: NULL_STYLE
+
+    tooltip_fields = ["Section", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
+                      "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF"]
+    tooltip_aliases = ["Section:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
+                       "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:"]
+
+    folium.GeoJson(
+        s_display.to_json(), name="Section Grid",
+        style_function=section_style,
+        highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.6},
+        tooltip=folium.GeoJsonTooltip(
+            fields=tooltip_fields, aliases=tooltip_aliases,
+            localize=True, sticky=True,
+            style="font-size:12px;padding:4px 8px;background:rgba(255,255,255,0.9);border:1px solid #333;border-radius:3px;",
+        ),
+    ).add_to(m)
+
+    units_fg = folium.FeatureGroup(name="Units", show=False)
+    folium.GeoJson(
+        units_display.to_json(),
+        style_function=lambda _: {"color": "black", "weight": 2, "fillOpacity": 0, "interactive": False},
+    ).add_to(units_fg)
+    units_fg.add_to(m)
+
+    line_wells = existing_display[existing_display.geometry.type != "Point"]
+    point_wells = existing_display[existing_display.geometry.type == "Point"]
+
+    well_fg = folium.FeatureGroup(name="Existing Wells")
+    if not line_wells.empty:
+        wl_fields = ["UWI"]
+        wl_aliases = ["UWI:"]
+        for wf, wa in [("EUR", "EUR:"), ("IP90", "IP90:"), ("Section", "Section:")]:
+            if wf in line_wells.columns:
+                wl_fields.append(wf)
+                wl_aliases.append(wa)
+        folium.GeoJson(
+            line_wells.to_json(),
+            style_function=lambda _: {"color": "black", "weight": 1, "opacity": 0.7},
+            highlight_function=lambda _: {"weight": 2.5, "color": "#555"},
+            tooltip=folium.GeoJsonTooltip(
+                fields=wl_fields, aliases=wl_aliases,
+                localize=True, sticky=True,
+                style="font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);border:1px solid #333;border-radius:3px;",
+            ),
+        ).add_to(well_fg)
+    for _, row in point_wells.iterrows():
+        tip_parts = [f"<b>UWI:</b> {row.get('UWI', '—')}"]
+        for col, label, fmt in [("EUR", "EUR", ",.0f"), ("IP90", "IP90", ",.0f"),
+                                ("1YCuml", "1Y Cuml", ",.0f"), ("Wcut", "Wcut", ".1f")]:
+            if col in row.index and pd.notna(row[col]):
+                tip_parts.append(f"<b>{label}:</b> {row[col]:{fmt}}")
+        folium.CircleMarker(
+            location=[row.geometry.y, row.geometry.x],
+            radius=4, color="black", fill=True, fill_color="black",
+            fill_opacity=0.7, weight=1,
+            tooltip=folium.Tooltip("<br>".join(tip_parts), sticky=True,
+                style="font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);border:1px solid #333;border-radius:3px;"),
+        ).add_to(well_fg)
+    well_fg.add_to(m)
+
+    folium.LayerControl(collapsed=True).add_to(m)
+    st_folium(m, use_container_width=True, height=900, returned_objects=[])
+
 
 # ==========================================================
 # PROSPECT ANALYSIS MODE
 # ==========================================================
-# ---- Buffer distance slider ----
-st.sidebar.markdown("---")
+else:
+
+    # ---- Buffer distance slider ----
+    st.sidebar.markdown("---")
     st.sidebar.subheader("📏 Buffer Distance")
     buffer_distance = st.sidebar.slider(
         "Buffer radius (m)", 100, 2000, DEFAULT_BUFFER_M, step=50, key="buf_dist",
