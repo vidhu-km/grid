@@ -145,9 +145,9 @@ analysis_mode = st.sidebar.radio(
 is_section_mode = analysis_mode == "Section Explorer"
 
 # ==========================================================
-# Sidebar — Analog Well Source
+# Sidebar — proximal Well Source
 # ==========================================================
-st.sidebar.subheader("📂 Analog Well Source")
+st.sidebar.subheader("📂 proximal Well Source")
 show_in_unit = st.sidebar.checkbox("In-Unit Wells", value=True)
 show_out_unit = st.sidebar.checkbox("Out-of-Unit Wells", value=False)
 
@@ -167,7 +167,7 @@ else:
     show_lease_lines = True
 
 # ==========================================================
-# Build the analog well pool
+# Build the proximal well pool
 # ==========================================================
 frames = []
 if show_in_unit:
@@ -184,17 +184,17 @@ points_only = points_with_uwi[~points_with_uwi["UWI"].isin(lines_with_uwi["UWI"]
 existing_wells = pd.concat([lines_with_uwi, points_only], ignore_index=True)
 existing_wells = gpd.GeoDataFrame(existing_wells, geometry="geometry", crs=lines_gdf.crs)
 
-analog_wells = existing_wells.merge(prod_pool, on="UWI", how="inner")
-analog_wells = gpd.GeoDataFrame(analog_wells, geometry="geometry", crs=existing_wells.crs)
-analog_wells["_midpoint"] = analog_wells.geometry.apply(midpoint_of_geom)
+proximal_wells = existing_wells.merge(prod_pool, on="UWI", how="inner")
+proximal_wells = gpd.GeoDataFrame(proximal_wells, geometry="geometry", crs=existing_wells.crs)
+proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
 # ==========================================================
 # Section enrichment
 # ==========================================================
 
 @st.cache_data(show_spinner="Computing section metrics …")
-def compute_section_metrics(_analog_wells, _grid_df):
-    aw = _analog_wells.copy()
+def compute_section_metrics(_proximal_wells, _grid_df):
+    aw = _proximal_wells.copy()
     g = _grid_df[["Section", "OOIP", "geometry"]].copy()
 
     endpoints = []
@@ -216,7 +216,7 @@ def compute_section_metrics(_analog_wells, _grid_df):
     endpoint_gdf = gpd.GeoDataFrame(
         valid.drop(columns=["geometry"]),
         geometry="_endpoint",
-        crs=_analog_wells.crs,
+        crs=_proximal_wells.crs,
     )
 
     joined = gpd.sjoin(endpoint_gdf, g, how="left", predicate="within")
@@ -263,7 +263,7 @@ def compute_section_metrics(_analog_wells, _grid_df):
     return g
 
 
-section_enriched = compute_section_metrics(analog_wells, grid_gdf)
+section_enriched = compute_section_metrics(proximal_wells, grid_gdf)
 
 
 # ==========================================================
@@ -332,9 +332,9 @@ if is_section_mode:
     units_display = units_gdf.copy().to_crs(4326)
 
     existing_display_cols = ["UWI", "geometry"] + [
-        c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in analog_wells.columns
+        c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in proximal_wells.columns
     ]
-    existing_display = analog_wells[existing_display_cols].copy().to_crs(4326)
+    existing_display = proximal_wells[existing_display_cols].copy().to_crs(4326)
 
     bounds = s_display.total_bounds
     centre = [(bounds[1] + bounds[3]) / 2, (bounds[0] + bounds[2]) / 2]
@@ -471,9 +471,9 @@ else:
 
     # ---- Prospect analysis with IDW ----
     @st.cache_data(show_spinner="Analysing prospects (IDW²) …")
-    def analyze_prospects_idw(_prospects, _analog_wells, _section_enriched, _buffer_m):
+    def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffer_m):
         pros = _prospects.copy()
-        analog = _analog_wells.copy()
+        proximal = _proximal_wells.copy()
         sections = _section_enriched.copy()
 
         results = []
@@ -485,8 +485,8 @@ else:
             if prospect_mid is None:
                 for col in WELL_LEVEL_METRICS + SECTION_LEVEL_METRICS:
                     record[col] = np.nan
-                record["Analog_Count"] = 0
-                record["_analog_uwis"] = ""
+                record["proximal_Count"] = 0
+                record["_proximal_uwis"] = ""
                 record["_section_label"] = "Unknown"
                 record["EUR_median"] = np.nan
                 record["EUR_p10"] = np.nan
@@ -512,10 +512,10 @@ else:
             # Buffer
             buffer_geom = geom.buffer(_buffer_m)
             buffer_gdf = gpd.GeoDataFrame([{"geometry": buffer_geom}], crs=pros.crs)
-            hits = gpd.sjoin(analog, buffer_gdf, how="inner", predicate="intersects")
+            hits = gpd.sjoin(proximal, buffer_gdf, how="inner", predicate="intersects")
 
-            record["Analog_Count"] = len(hits)
-            record["_analog_uwis"] = ",".join(hits["UWI"].tolist()) if len(hits) > 0 else ""
+            record["proximal_Count"] = len(hits)
+            record["_proximal_uwis"] = ",".join(hits["UWI"].tolist()) if len(hits) > 0 else ""
 
             if len(hits) > 0:
                 hit_mids = hits["_midpoint"].apply(
@@ -583,7 +583,7 @@ else:
         results_df = results_df.set_index("_idx")
         return results_df
 
-    prospect_metrics = analyze_prospects_idw(prospects, analog_wells, section_enriched, buffer_distance)
+    prospect_metrics = analyze_prospects_idw(prospects, proximal_wells, section_enriched, buffer_distance)
 
     prospects = prospects.join(
         prospect_metrics.drop(columns=["_prospect_type"], errors="ignore")
@@ -594,7 +594,7 @@ else:
         if col in prospects.columns:
             prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
-    prospects["Confidence"] = prospects["Analog_Count"].fillna(0).apply(confidence_tier)
+    prospects["Confidence"] = prospects["proximal_Count"].fillna(0).apply(confidence_tier)
 
     # ---- Filters ----
     st.sidebar.markdown("---")
@@ -623,9 +623,9 @@ else:
     _rftd_lo, _rftd_hi = safe_range(p["RFTD"])
     f_rftd = st.sidebar.slider("Max RFTD", _rftd_lo, _rftd_hi, _rftd_hi, step=0.01, format="%.2f", key="p_rftd")
 
-    has_analogs = p["Analog_Count"] > 0
+    has_proximals = p["proximal_Count"] > 0
     filter_mask = (
-        has_analogs
+        has_proximals
         & ((p["Wcut"] <= f_wcut) | p["Wcut"].isna())
         & ((p["OOIP"] >= f_ooip) | p["OOIP"].isna())
         & ((p["EUR"] >= f_eur) | p["EUR"].isna())
@@ -636,18 +636,18 @@ else:
     )
 
     p["_passes_filter"] = filter_mask
-    p["_no_analogs"] = ~has_analogs
+    p["_no_proximals"] = ~has_proximals
 
     n_total = len(p)
     n_passing = int(filter_mask.sum())
-    n_no_analogs = int((~has_analogs).sum())
+    n_no_proximals = int((~has_proximals).sum())
 
     st.sidebar.markdown(
         f"**{n_passing}** / {n_total} prospects pass filters "
         f"({n_passing / max(n_total, 1) * 100:.0f}%)"
     )
-    if n_no_analogs > 0:
-        st.sidebar.warning(f"⚠️ {n_no_analogs} prospects have no nearby analogs")
+    if n_no_proximals > 0:
+        st.sidebar.warning(f"⚠️ {n_no_proximals} prospects have no nearby proximals")
 
     # ---- Ranking metric ----
     st.sidebar.markdown("---")
@@ -707,7 +707,7 @@ else:
             + (w_rftd / 100) * z_rftd
         )
 
-        conf_factor = passing["Analog_Count"].clip(upper=CONFIDENCE_HIGH) / CONFIDENCE_HIGH
+        conf_factor = passing["proximal_Count"].clip(upper=CONFIDENCE_HIGH) / CONFIDENCE_HIGH
         hgs_adjusted = hgs * conf_factor
 
         p["HighGradeScore"] = np.nan
@@ -723,7 +723,7 @@ else:
 
     # ---- Rank stability ----
     @st.cache_data(show_spinner="Computing rank stability …")
-    def compute_rank_stability(_p_df, _analog_wells, _buffer_m, _metric_col, _ascending):
+    def compute_rank_stability(_p_df, _proximal_wells, _buffer_m, _metric_col, _ascending):
         p_local = _p_df.copy()
         passing = p_local[p_local["_passes_filter"]].copy()
         if passing.empty or _metric_col not in passing.columns:
@@ -735,13 +735,13 @@ else:
         baseline["_base_rank"] = range(1, len(baseline) + 1)
         base_map = dict(zip(baseline["index"], baseline["_base_rank"]))
 
-        analog = _analog_wells.copy()
+        proximal = _proximal_wells.copy()
         stability = {}
 
         for pidx in passing.index:
             geom = p_local.loc[pidx, "geometry"]
             prospect_mid = midpoint_of_geom(geom)
-            uwi_str = p_local.loc[pidx].get("_analog_uwis", "")
+            uwi_str = p_local.loc[pidx].get("_proximal_uwis", "")
             if not uwi_str or pd.isna(uwi_str):
                 stability[pidx] = 0
                 continue
@@ -751,27 +751,27 @@ else:
                 stability[pidx] = np.nan
                 continue
 
-            analog_sub = analog[analog["UWI"].isin(uwi_list)]
-            if analog_sub.empty or prospect_mid is None:
+            proximal_sub = proximal[proximal["UWI"].isin(uwi_list)]
+            if proximal_sub.empty or prospect_mid is None:
                 stability[pidx] = 0
                 continue
 
             if _metric_col in WELL_LEVEL_METRICS:
                 if _ascending:
-                    best_idx = analog_sub[_metric_col].idxmin()
+                    best_idx = proximal_sub[_metric_col].idxmin()
                 else:
-                    best_idx = analog_sub[_metric_col].idxmax()
+                    best_idx = proximal_sub[_metric_col].idxmax()
                 if pd.isna(best_idx):
                     stability[pidx] = 0
                     continue
-                best_uwi = analog_sub.loc[best_idx, "UWI"]
+                best_uwi = proximal_sub.loc[best_idx, "UWI"]
             else:
-                dists = analog_sub["_midpoint"].apply(
+                dists = proximal_sub["_midpoint"].apply(
                     lambda mp: prospect_mid.distance(mp) if mp is not None else np.inf
                 )
-                best_uwi = analog_sub.loc[dists.idxmin(), "UWI"]
+                best_uwi = proximal_sub.loc[dists.idxmin(), "UWI"]
 
-            remaining = analog_sub[analog_sub["UWI"] != best_uwi]
+            remaining = proximal_sub[proximal_sub["UWI"] != best_uwi]
             if remaining.empty:
                 stability[pidx] = np.nan
                 continue
@@ -810,7 +810,7 @@ else:
         return pd.Series(stability)
 
     if n_passing > 0 and metric_col in p.columns:
-        rank_stability = compute_rank_stability(p, analog_wells, buffer_distance, metric_col, ascending)
+        rank_stability = compute_rank_stability(p, proximal_wells, buffer_distance, metric_col, ascending)
         p["RankStability"] = rank_stability
     else:
         p["RankStability"] = np.nan
@@ -832,9 +832,9 @@ else:
     units_display = units_gdf.copy().to_crs(4326)
 
     existing_display_cols = ["UWI", "geometry"] + [
-        c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in analog_wells.columns
+        c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in proximal_wells.columns
     ]
-    existing_display = analog_wells[existing_display_cols].copy().to_crs(4326)
+    existing_display = proximal_wells[existing_display_cols].copy().to_crs(4326)
 
     # Build buffer GeoDataFrame in projected CRS, then reproject
     buffer_records = []
@@ -842,9 +842,9 @@ else:
         buffer_records.append({
             "Label": row["Label"],
             "_passes_filter": row["_passes_filter"],
-            "_no_analogs": row["_no_analogs"],
+            "_no_proximals": row["_no_proximals"],
             "_rank_pct": row.get("_rank_pct", np.nan),
-            "Analog_Count": row.get("Analog_Count", 0),
+            "proximal_Count": row.get("proximal_Count", 0),
             "Confidence": row.get("Confidence", "—"),
             "EUR": row.get("EUR", np.nan),
             "IP90": row.get("IP90", np.nan),
@@ -876,7 +876,7 @@ else:
     # EXECUTIVE SUMMARY
     # ================================================================
     st.title("🛢️ Bakken Prospect Analyzer")
-    st.caption("Identifying the best locations to drill next based on analog well performance and reservoir quality.")
+    st.caption("Identifying the best locations to drill next based on proximal well performance and reservoir quality.")
 
     if n_passing > 0:
         best_pool = p[p["_passes_filter"]].dropna(subset=[metric_col])
@@ -885,14 +885,14 @@ else:
             best_name = best_row["Label"]
             best_val = best_row[metric_col]
 
-            avg_analogs = p[p["_passes_filter"]]["Analog_Count"].mean()
-            high_conf_count = int((p[p["_passes_filter"]]["Analog_Count"] >= CONFIDENCE_HIGH).sum())
+            avg_proximals = p[p["_passes_filter"]]["proximal_Count"].mean()
+            high_conf_count = int((p[p["_passes_filter"]]["proximal_Count"] >= CONFIDENCE_HIGH).sum())
 
             st.success(
                 f"**{n_passing}** of {n_total} prospects pass filters. "
                 f"Top prospect by **{selected_metric}**: **{best_name}** "
                 f"({metric_col} = {best_val:,.2f}). "
-                f"Avg analogs/prospect: **{avg_analogs:.1f}** — "
+                f"Avg proximals/prospect: **{avg_proximals:.1f}** — "
                 f"**{high_conf_count}** with high-confidence support (≥{CONFIDENCE_HIGH} wells)."
             )
         else:
@@ -985,7 +985,7 @@ else:
 
             tip_parts = [
                 f"<b>{brow['Label']}</b>",
-                f"Analogs: {brow.get('Analog_Count', '—')}",
+                f"proximals: {brow.get('proximal_Count', '—')}",
                 f"Confidence: {brow.get('Confidence', '—')}",
             ]
             for col, label, fmt in [
@@ -1009,7 +1009,7 @@ else:
             ).add_to(buffer_fg)
 
         # Filtered-out buffers
-        filtered_buf = buffer_gdf[~buffer_gdf["_passes_filter"] & ~buffer_gdf["_no_analogs"]]
+        filtered_buf = buffer_gdf[~buffer_gdf["_passes_filter"] & ~buffer_gdf["_no_proximals"]]
         for bidx, brow in filtered_buf.iterrows():
             folium.GeoJson(
                 brow.geometry.__geo_interface__,
@@ -1021,16 +1021,16 @@ else:
                     style="font-size:11px;padding:3px 6px;background:rgba(200,200,200,0.9);border:1px solid #888;border-radius:3px;"),
             ).add_to(buffer_fg)
 
-        # No-analog buffers
-        no_analog_buf = buffer_gdf[buffer_gdf["_no_analogs"]]
-        for bidx, brow in no_analog_buf.iterrows():
+        # No-proximal buffers
+        no_proximal_buf = buffer_gdf[buffer_gdf["_no_proximals"]]
+        for bidx, brow in no_proximal_buf.iterrows():
             folium.GeoJson(
                 brow.geometry.__geo_interface__,
                 style_function=lambda _: {
                     "fillColor": "#ffe0b2", "fillOpacity": 0.1,
                     "color": "orange", "weight": 1, "dashArray": "5 5", "opacity": 0.4,
                 },
-                tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>No analogs in buffer", sticky=True,
+                tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>No proximals in buffer", sticky=True,
                     style="font-size:11px;padding:3px 6px;background:rgba(255,224,178,0.9);border:1px solid orange;border-radius:3px;"),
             ).add_to(buffer_fg)
 
@@ -1080,7 +1080,7 @@ else:
         # Build clean tooltip fields from what's available
         pt_fields_wanted = [
             ("Label", "Prospect:"), ("_prospect_type", "Type:"),
-            ("Analog_Count", "Analogs:"), ("Confidence", "Confidence:"),
+            ("proximal_Count", "proximals:"), ("Confidence", "Confidence:"),
             ("EUR", "EUR:"), ("IP90", "IP90:"), ("1YCuml", "1Y Cuml:"),
             ("Wcut", "Wcut:"), ("OOIP", "OOIP:"), ("RFTD", "RFTD:"), ("URF", "URF:"),
         ]
@@ -1114,7 +1114,7 @@ else:
             rank_df = p[p["_passes_filter"]].copy()
 
             display_cols = [
-                "Label", "_prospect_type", "Analog_Count", "Confidence",
+                "Label", "_prospect_type", "proximal_Count", "Confidence",
                 "EUR", "IP90", "1YCuml", "Wcut",
                 "OOIP", "RFTD", "URF",
                 "EUR_median", "EUR_p10", "EUR_p90",
@@ -1141,7 +1141,7 @@ else:
 
                 rename_map = {
                     "_prospect_type": "Type",
-                    "Analog_Count": "Analogs",
+                    "proximal_Count": "proximals",
                     "EUR_median": "EUR Med",
                     "EUR_p10": "EUR P10",
                     "EUR_p90": "EUR P90",
@@ -1170,7 +1170,7 @@ else:
                     "Wcut": "{:.1f}", "OOIP": "{:,.0f}",
                     "RFTD": "{:.3f}", "URF": "{:.3f}", "Percentile": "{:.0f}%",
                     "EUR Med": "{:,.0f}", "EUR P10": "{:,.0f}", "EUR P90": "{:,.0f}",
-                    "Analogs": "{:.0f}", "Rank Δ": "{:+.0f}",
+                    "proximals": "{:.0f}", "Rank Δ": "{:+.0f}",
                 }
                 if "HighGradeScore" in rank_df.columns:
                     fmt["HighGradeScore"] = "{:.3f}"
@@ -1244,7 +1244,7 @@ else:
                     dc5.metric("OOIP", f"{dr['OOIP']:,.0f}" if pd.notna(dr.get("OOIP")) else "—")
                     dc6.metric("URF", f"{dr['URF']:.3f}" if pd.notna(dr.get("URF")) else "—")
                     dc7.metric("RFTD", f"{dr['RFTD']:.3f}" if pd.notna(dr.get("RFTD")) else "—")
-                    dc8.metric("Analogs", f"{dr['Analogs']:.0f}" if pd.notna(dr.get("Analogs")) else "—")
+                    dc8.metric("proximals", f"{dr['proximals']:.0f}" if pd.notna(dr.get("proximals")) else "—")
 
                     dc9, dc10, dc11 = st.columns(3)
                     dc9.metric("Confidence", dr.get("Confidence", "—"))
@@ -1438,17 +1438,17 @@ else:
                         )
                         st.plotly_chart(fig_cum2, use_container_width=True)
 
-            # ---- No-analog prospects ----
-            no_analog_prospects = p[p["_no_analogs"]].copy()
-            if not no_analog_prospects.empty:
+            # ---- No-proximal prospects ----
+            no_proximal_prospects = p[p["_no_proximals"]].copy()
+            if not no_proximal_prospects.empty:
                 st.markdown("---")
-                st.subheader("⚠️ No Analogs Found")
+                st.subheader("⚠️ No proximals Found")
                 st.caption(
-                    f"These {len(no_analog_prospects)} prospects have no analog wells within "
+                    f"These {len(no_proximal_prospects)} prospects have no proximal wells within "
                     f"the {buffer_distance}m buffer. Consider increasing buffer distance."
                 )
                 st.dataframe(
-                    no_analog_prospects[["Label", "_prospect_type"]]
+                    no_proximal_prospects[["Label", "_prospect_type"]]
                     .rename(columns={"_prospect_type": "Type"})
                     .reset_index(drop=True),
                     use_container_width=True,
