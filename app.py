@@ -6,9 +6,10 @@ import folium
 from folium.plugins import MiniMap
 from streamlit_folium import st_folium
 import branca.colormap as cm
-from shapely.geometry import Point, MultiLineString, LineString
+from shapely.geometry import Point
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from pyproj import Transformer
 
 # ==========================================================
 # Page configuration
@@ -32,7 +33,6 @@ NULL_STYLE = {
 WELL_LEVEL_METRICS = ["EUR", "IP90", "1YCuml", "Wcut"]
 SECTION_LEVEL_METRICS = ["OOIP", "RFTD", "URF"]
 
-DEFAULT_TOP_N = 5
 DEFAULT_BUFFER_M = 500
 CONFIDENCE_HIGH = 8
 
@@ -59,13 +59,11 @@ def zscore(s: pd.Series) -> pd.Series:
 
 
 def midpoint_of_geom(geom):
-    """Return the midpoint of a linestring/multilinestring, or centroid for others."""
     if geom is None or geom.is_empty:
         return None
     if geom.geom_type == "LineString":
         return geom.interpolate(0.5, normalized=True)
     elif geom.geom_type == "MultiLineString":
-        # Use the longest constituent
         longest = max(geom.geoms, key=lambda g: g.length)
         return longest.interpolate(0.5, normalized=True)
     elif geom.geom_type == "Point":
@@ -129,14 +127,8 @@ def load_data():
 
 
 (
-    lines_gdf,
-    points_gdf,
-    grid_gdf,
-    units_gdf,
-    infills_gdf,
-    lease_lines_gdf,
-    prod_in_df,
-    prod_out_df,
+    lines_gdf, points_gdf, grid_gdf, units_gdf,
+    infills_gdf, lease_lines_gdf, prod_in_df, prod_out_df,
 ) = load_data()
 
 # ==========================================================
@@ -163,7 +155,6 @@ if not show_in_unit and not show_out_unit:
     st.sidebar.error("Select at least one well source.")
     st.stop()
 
-# --- Prospect type selection (only in prospect mode) ---
 if not is_section_mode:
     st.sidebar.subheader("🎯 Prospect Type")
     show_infills = st.sidebar.checkbox("2M Infills", value=True)
@@ -195,12 +186,10 @@ existing_wells = gpd.GeoDataFrame(existing_wells, geometry="geometry", crs=lines
 
 analog_wells = existing_wells.merge(prod_pool, on="UWI", how="inner")
 analog_wells = gpd.GeoDataFrame(analog_wells, geometry="geometry", crs=existing_wells.crs)
-
-# Pre-compute midpoints for analog wells
 analog_wells["_midpoint"] = analog_wells.geometry.apply(midpoint_of_geom)
 
 # ==========================================================
-# Section enrichment (for gradient backgrounds & section-level metrics)
+# Section enrichment
 # ==========================================================
 
 @st.cache_data(show_spinner="Computing section metrics …")
@@ -208,7 +197,6 @@ def compute_section_metrics(_analog_wells, _grid_df):
     aw = _analog_wells.copy()
     g = _grid_df[["Section", "OOIP", "geometry"]].copy()
 
-    # Assign wells to sections by endpoint
     endpoints = []
     for idx, row in aw.iterrows():
         geom = row.geometry
@@ -233,7 +221,6 @@ def compute_section_metrics(_analog_wells, _grid_df):
 
     joined = gpd.sjoin(endpoint_gdf, g, how="left", predicate="within")
 
-    # Resolve section column naming
     sec_col = None
     for c in joined.columns:
         if "Section" in c and c.endswith("right"):
@@ -287,7 +274,6 @@ if is_section_mode:
     st.title("🗺️ Bakken Section Explorer")
     st.caption("Browse section-level data. Switch to **Prospect Analysis** for drilling recommendations.")
 
-    # ---- Gradient selector ----
     st.sidebar.markdown("---")
     st.sidebar.subheader("🗺️ Section Grid Gradient")
     GRADIENT_OPTIONS = ["None", "OOIP", "Avg EUR", "Avg IP90", "Avg 1YCuml",
@@ -299,7 +285,6 @@ if is_section_mode:
     }
     section_gradient = st.sidebar.selectbox("Colour sections by", GRADIENT_OPTIONS, key="se_grad")
 
-    # ---- Filters ----
     st.sidebar.markdown("---")
     st.sidebar.subheader("🔍 Section Filters")
 
@@ -356,7 +341,6 @@ if is_section_mode:
     m = folium.Map(location=centre, zoom_start=11, tiles="CartoDB positron")
     MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 
-    # Section grid
     if section_gradient != "None":
         grad_col = GRADIENT_COL_MAP[section_gradient]
         grad_vals = s_display[grad_col].dropna()
@@ -400,7 +384,6 @@ if is_section_mode:
         ),
     ).add_to(m)
 
-    # Units
     units_fg = folium.FeatureGroup(name="Units", show=False)
     folium.GeoJson(
         units_display.to_json(),
@@ -408,7 +391,6 @@ if is_section_mode:
     ).add_to(units_fg)
     units_fg.add_to(m)
 
-    # Existing wells — black
     line_wells = existing_display[existing_display.geometry.type != "Point"]
     point_wells = existing_display[existing_display.geometry.type == "Point"]
 
@@ -488,18 +470,17 @@ else:
     prospects = gpd.GeoDataFrame(prospects, geometry="geometry", crs=infills_gdf.crs)
 
     # ---- Prospect analysis with IDW ----
-    @st.cache_data(show_spinner="Analysing prospects (IDW) …")
+    @st.cache_data(show_spinner="Analysing prospects (IDW²) …")
     def analyze_prospects_idw(_prospects, _analog_wells, _section_enriched, _buffer_m):
-        prospects = _prospects.copy()
+        pros = _prospects.copy()
         analog = _analog_wells.copy()
         sections = _section_enriched.copy()
 
         results = []
-        for idx, prospect in prospects.iterrows():
+        for idx, prospect in pros.iterrows():
             geom = prospect.geometry
             record = {"_idx": idx, "_prospect_type": prospect["_prospect_type"]}
 
-            # Prospect midpoint
             prospect_mid = midpoint_of_geom(geom)
             if prospect_mid is None:
                 for col in WELL_LEVEL_METRICS + SECTION_LEVEL_METRICS:
@@ -521,7 +502,7 @@ else:
             else:
                 endpoint = prospect_mid
 
-            ep_gdf = gpd.GeoDataFrame([{"geometry": endpoint}], crs=prospects.crs)
+            ep_gdf = gpd.GeoDataFrame([{"geometry": endpoint}], crs=pros.crs)
             sec_hit = gpd.sjoin(ep_gdf, sections[["Section", "geometry"]], how="left", predicate="within")
             if not sec_hit.empty and pd.notna(sec_hit.iloc[0].get("Section")):
                 record["_section_label"] = str(sec_hit.iloc[0]["Section"])
@@ -530,18 +511,16 @@ else:
 
             # Buffer
             buffer_geom = geom.buffer(_buffer_m)
-            buffer_gdf = gpd.GeoDataFrame([{"geometry": buffer_geom}], crs=prospects.crs)
+            buffer_gdf = gpd.GeoDataFrame([{"geometry": buffer_geom}], crs=pros.crs)
             hits = gpd.sjoin(analog, buffer_gdf, how="inner", predicate="intersects")
 
             record["Analog_Count"] = len(hits)
             record["_analog_uwis"] = ",".join(hits["UWI"].tolist()) if len(hits) > 0 else ""
 
             if len(hits) > 0:
-                # Compute distances from prospect midpoint to analog midpoints
                 hit_mids = hits["_midpoint"].apply(
                     lambda mp: prospect_mid.distance(mp) if mp is not None else np.nan
                 )
-                # Minimum distance floor to avoid division by zero
                 hit_mids = hit_mids.replace(0, 1.0)
                 weights = 1.0 / (hit_mids ** 2)
                 weights = weights.replace([np.inf, -np.inf], np.nan)
@@ -570,8 +549,8 @@ else:
                 record["EUR_p10"] = np.nan
                 record["EUR_p90"] = np.nan
 
-            # Section-level metrics — simple mean of overlapping sections
-            buffer_series = gpd.GeoSeries([buffer_geom], crs=prospects.crs)
+            # Section-level metrics — simple mean
+            buffer_series = gpd.GeoSeries([buffer_geom], crs=pros.crs)
             buffer_clip_gdf = gpd.GeoDataFrame(geometry=buffer_series)
 
             overlaps = gpd.overlay(
@@ -728,7 +707,6 @@ else:
             + (w_rftd / 100) * z_rftd
         )
 
-        # Confidence adjustment: score * min(1, n/8)
         conf_factor = passing["Analog_Count"].clip(upper=CONFIDENCE_HIGH) / CONFIDENCE_HIGH
         hgs_adjusted = hgs * conf_factor
 
@@ -745,61 +723,55 @@ else:
 
     # ---- Rank stability ----
     @st.cache_data(show_spinner="Computing rank stability …")
-    def compute_rank_stability(_prospects_df, _analog_wells, _section_enriched,
-                               _buffer_m, _metric_col, _ascending):
-        """
-        For each passing prospect, remove its single best analog and re-rank.
-        Return how many ranks each prospect drops.
-        """
-        p = _prospects_df.copy()
-        passing = p[p["_passes_filter"]].copy()
+    def compute_rank_stability(_p_df, _analog_wells, _buffer_m, _metric_col, _ascending):
+        p_local = _p_df.copy()
+        passing = p_local[p_local["_passes_filter"]].copy()
         if passing.empty or _metric_col not in passing.columns:
             return pd.Series(dtype=float)
 
-        baseline_rank = passing.dropna(subset=[_metric_col]).sort_values(
+        baseline = passing.dropna(subset=[_metric_col]).sort_values(
             _metric_col, ascending=_ascending
         ).reset_index()
-        baseline_rank["_base_rank"] = range(1, len(baseline_rank) + 1)
-        base_map = dict(zip(baseline_rank["index"], baseline_rank["_base_rank"]))
+        baseline["_base_rank"] = range(1, len(baseline) + 1)
+        base_map = dict(zip(baseline["index"], baseline["_base_rank"]))
 
         analog = _analog_wells.copy()
-        sections = _section_enriched.copy()
-
         stability = {}
+
         for pidx in passing.index:
-            prospect_geom = p.loc[pidx, "geometry"]
-            prospect_mid = midpoint_of_geom(prospect_geom)
-            analog_uwis_str = p.loc[pidx, "_analog_uwis"] if "_analog_uwis" in p.columns else ""
-            if not analog_uwis_str or pd.isna(analog_uwis_str):
+            geom = p_local.loc[pidx, "geometry"]
+            prospect_mid = midpoint_of_geom(geom)
+            uwi_str = p_local.loc[pidx].get("_analog_uwis", "")
+            if not uwi_str or pd.isna(uwi_str):
                 stability[pidx] = 0
                 continue
 
-            uwi_list = [u.strip() for u in str(analog_uwis_str).split(",") if u.strip()]
+            uwi_list = [u.strip() for u in str(uwi_str).split(",") if u.strip()]
             if len(uwi_list) <= 1:
-                stability[pidx] = np.nan  # Can't remove — stability undefined
+                stability[pidx] = np.nan
                 continue
 
-            analog_subset = analog[analog["UWI"].isin(uwi_list)]
-            if analog_subset.empty or prospect_mid is None:
+            analog_sub = analog[analog["UWI"].isin(uwi_list)]
+            if analog_sub.empty or prospect_mid is None:
                 stability[pidx] = 0
                 continue
 
-            # Find the analog that contributes most to the ranked metric
-            # Approximate: the one with the best value of the metric (or worst for inverted)
             if _metric_col in WELL_LEVEL_METRICS:
                 if _ascending:
-                    best_uwi = analog_subset.loc[analog_subset[_metric_col].idxmin(), "UWI"]
+                    best_idx = analog_sub[_metric_col].idxmin()
                 else:
-                    best_uwi = analog_subset.loc[analog_subset[_metric_col].idxmax(), "UWI"]
+                    best_idx = analog_sub[_metric_col].idxmax()
+                if pd.isna(best_idx):
+                    stability[pidx] = 0
+                    continue
+                best_uwi = analog_sub.loc[best_idx, "UWI"]
             else:
-                # For section-level or composite metrics, remove closest analog
-                dists = analog_subset["_midpoint"].apply(
+                dists = analog_sub["_midpoint"].apply(
                     lambda mp: prospect_mid.distance(mp) if mp is not None else np.inf
                 )
-                best_uwi = analog_subset.loc[dists.idxmin(), "UWI"]
+                best_uwi = analog_sub.loc[dists.idxmin(), "UWI"]
 
-            # Re-compute IDW without that analog
-            remaining = analog_subset[analog_subset["UWI"] != best_uwi]
+            remaining = analog_sub[analog_sub["UWI"] != best_uwi]
             if remaining.empty:
                 stability[pidx] = np.nan
                 continue
@@ -807,8 +779,7 @@ else:
             hit_mids = remaining["_midpoint"].apply(
                 lambda mp: prospect_mid.distance(mp) if mp is not None else np.nan
             ).replace(0, 1.0)
-            weights = 1.0 / (hit_mids ** 2)
-            weights = weights.replace([np.inf, -np.inf], np.nan).dropna()
+            weights = (1.0 / (hit_mids ** 2)).replace([np.inf, -np.inf], np.nan).dropna()
 
             new_val = np.nan
             if _metric_col in WELL_LEVEL_METRICS and weights.sum() > 0:
@@ -822,13 +793,12 @@ else:
                 stability[pidx] = 0
                 continue
 
-            # Build comparison: swap in the new value, re-rank
             comparison = passing[[_metric_col]].copy()
             comparison.loc[pidx, _metric_col] = new_val
             comparison = comparison.dropna(subset=[_metric_col])
-            new_rank_df = comparison.sort_values(_metric_col, ascending=_ascending).reset_index()
-            new_rank_df["_new_rank"] = range(1, len(new_rank_df) + 1)
-            new_map = dict(zip(new_rank_df["index"], new_rank_df["_new_rank"]))
+            new_ranks = comparison.sort_values(_metric_col, ascending=_ascending).reset_index()
+            new_ranks["_new_rank"] = range(1, len(new_ranks) + 1)
+            new_map = dict(zip(new_ranks["index"], new_ranks["_new_rank"]))
 
             old_r = base_map.get(pidx, np.nan)
             new_r = new_map.get(pidx, np.nan)
@@ -840,32 +810,24 @@ else:
         return pd.Series(stability)
 
     if n_passing > 0 and metric_col in p.columns:
-        rank_stability = compute_rank_stability(
-            p, analog_wells, section_enriched, buffer_distance, metric_col, ascending
-        )
+        rank_stability = compute_rank_stability(p, analog_wells, buffer_distance, metric_col, ascending)
         p["RankStability"] = rank_stability
     else:
         p["RankStability"] = np.nan
 
-    # ---- Prepare map data ----
-    p_display = p.copy()
-
-    # Build buffer geometries for display
-    p_display["_buffer_geom"] = p_display.geometry.buffer(buffer_distance)
-
-    # Assign rank-based green value to passing prospects
-    passing_for_rank = p_display[p_display["_passes_filter"]].dropna(subset=[metric_col]).copy()
+    # ---- Rank percentile for buffer gradient ----
+    passing_for_rank = p[p["_passes_filter"]].dropna(subset=[metric_col]).copy()
     if not passing_for_rank.empty:
         if ascending:
             passing_for_rank["_rank_pct"] = passing_for_rank[metric_col].rank(pct=True, ascending=True)
         else:
             passing_for_rank["_rank_pct"] = passing_for_rank[metric_col].rank(pct=True, ascending=False)
-        # _rank_pct: 1.0 = best, 0.0 = worst
-        p_display["_rank_pct"] = np.nan
-        p_display.loc[passing_for_rank.index, "_rank_pct"] = passing_for_rank["_rank_pct"]
+        p["_rank_pct"] = np.nan
+        p.loc[passing_for_rank.index, "_rank_pct"] = passing_for_rank["_rank_pct"]
     else:
-        p_display["_rank_pct"] = np.nan
+        p["_rank_pct"] = np.nan
 
+    # ---- Prepare display data ----
     section_display = section_enriched.copy().to_crs(4326)
     units_display = units_gdf.copy().to_crs(4326)
 
@@ -873,6 +835,42 @@ else:
         c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in analog_wells.columns
     ]
     existing_display = analog_wells[existing_display_cols].copy().to_crs(4326)
+
+    # Build buffer GeoDataFrame in projected CRS, then reproject
+    buffer_records = []
+    for idx, row in p.iterrows():
+        buffer_records.append({
+            "Label": row["Label"],
+            "_passes_filter": row["_passes_filter"],
+            "_no_analogs": row["_no_analogs"],
+            "_rank_pct": row.get("_rank_pct", np.nan),
+            "Analog_Count": row.get("Analog_Count", 0),
+            "Confidence": row.get("Confidence", "—"),
+            "EUR": row.get("EUR", np.nan),
+            "IP90": row.get("IP90", np.nan),
+            "1YCuml": row.get("1YCuml", np.nan),
+            "Wcut": row.get("Wcut", np.nan),
+            "OOIP": row.get("OOIP", np.nan),
+            "RFTD": row.get("RFTD", np.nan),
+            "URF": row.get("URF", np.nan),
+            "geometry": row.geometry.buffer(buffer_distance),
+        })
+    buffer_gdf = gpd.GeoDataFrame(buffer_records, crs=p.crs).to_crs(4326)
+
+    # Prospect lines for display — drop non-serialisable columns
+    p_lines = p.copy()
+    drop_cols = [c for c in p_lines.columns if c.startswith("_") and c not in ["_prospect_type"]]
+    # Also drop any object-dtype columns that aren't strings
+    for c in p_lines.columns:
+        if c == "geometry":
+            continue
+        if p_lines[c].dtype == object:
+            try:
+                p_lines[c] = p_lines[c].astype(str)
+            except Exception:
+                drop_cols.append(c)
+    p_lines = p_lines.drop(columns=[c for c in drop_cols if c in p_lines.columns], errors="ignore")
+    p_lines_display = p_lines.to_crs(4326)
 
     # ================================================================
     # EXECUTIVE SUMMARY
@@ -908,11 +906,9 @@ else:
     # LEFT COLUMN — Map
     # ----------------------------------------------------------
     with col_map:
-        bounds = p_display.total_bounds
-        centre_y = (bounds[1] + bounds[3]) / 2
+        bounds = p.total_bounds  # in projected CRS
         centre_x = (bounds[0] + bounds[2]) / 2
-        # Convert to 4326 for folium
-        from pyproj import Transformer
+        centre_y = (bounds[1] + bounds[3]) / 2
         transformer = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
         centre_lon, centre_lat = transformer.transform(centre_x, centre_y)
 
@@ -947,10 +943,10 @@ else:
         else:
             section_style = lambda _: NULL_STYLE
 
-        sec_tooltip_fields = ["Section", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
-                              "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF"]
-        sec_tooltip_aliases = ["Section:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
-                               "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:"]
+        sec_fields = ["Section", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
+                      "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF"]
+        sec_aliases = ["Section:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
+                       "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:"]
 
         section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
         folium.GeoJson(
@@ -958,14 +954,14 @@ else:
             style_function=section_style,
             highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
             tooltip=folium.GeoJsonTooltip(
-                fields=sec_tooltip_fields, aliases=sec_tooltip_aliases,
+                fields=sec_fields, aliases=sec_aliases,
                 localize=True, sticky=True,
                 style="font-size:11px;padding:4px 8px;background:rgba(255,255,255,0.9);border:1px solid #333;border-radius:3px;",
             ),
         ).add_to(section_fg)
         section_fg.add_to(m)
 
-        # Layer 2: Units (toggleable, off by default)
+        # Layer 2: Units
         units_fg = folium.FeatureGroup(name="Units", show=False)
         folium.GeoJson(
             units_display.to_json(),
@@ -973,8 +969,7 @@ else:
         ).add_to(units_fg)
         units_fg.add_to(m)
 
-        # Layer 3: Buffers with green gradient
-        # Build a green colormap for buffer ranking
+        # Layer 3: Buffers
         green_cmap = cm.LinearColormap(
             colors=["#f7fcf5", "#74c476", "#00441b"],
             vmin=0, vmax=1,
@@ -982,80 +977,62 @@ else:
 
         buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 
-        # Convert buffers to 4326 for display
-        buffer_gdf = gpd.GeoDataFrame(
-            p_display[["Label", "_passes_filter", "_no_analogs", "_rank_pct"]].copy(),
-            geometry=p_display["_buffer_geom"],
-            crs=p_display.crs,
-        ).to_crs(4326)
-
-        # Add tooltip data
-        for col in ["EUR", "IP90", "1YCuml", "Wcut", "OOIP", "RFTD", "URF",
-                     "Analog_Count", "Confidence"]:
-            if col in p_display.columns:
-                buffer_gdf[col] = p_display[col].values
-
         # Passing buffers
-        passing_buffers = buffer_gdf[buffer_gdf["_passes_filter"]].copy()
-        if not passing_buffers.empty:
-            for bidx, brow in passing_buffers.iterrows():
-                rank_pct = brow["_rank_pct"] if pd.notna(brow["_rank_pct"]) else 0.5
-                fill_color = green_cmap(rank_pct)
+        passing_buf = buffer_gdf[buffer_gdf["_passes_filter"]].copy()
+        for bidx, brow in passing_buf.iterrows():
+            rank_pct = brow["_rank_pct"] if pd.notna(brow["_rank_pct"]) else 0.5
+            fill_color = green_cmap(rank_pct)
 
-                tip_parts = [
-                    f"<b>{brow['Label']}</b>",
-                    f"Analogs: {brow.get('Analog_Count', '—')}",
-                    f"Confidence: {brow.get('Confidence', '—')}",
-                ]
-                for col, label, fmt in [
-                    ("EUR", "EUR", ",.0f"), ("IP90", "IP90", ",.0f"),
-                    ("1YCuml", "1Y Cuml", ",.0f"), ("Wcut", "Wcut", ".1f"),
-                    ("OOIP", "OOIP", ",.0f"), ("RFTD", "RFTD", ".3f"),
-                    ("URF", "URF", ".3f"),
-                ]:
-                    if col in brow.index and pd.notna(brow[col]):
-                        tip_parts.append(f"{label}: {brow[col]:{fmt}}")
-                tip_text = "<br>".join(tip_parts)
+            tip_parts = [
+                f"<b>{brow['Label']}</b>",
+                f"Analogs: {brow.get('Analog_Count', '—')}",
+                f"Confidence: {brow.get('Confidence', '—')}",
+            ]
+            for col, label, fmt in [
+                ("EUR", "EUR", ",.0f"), ("IP90", "IP90", ",.0f"),
+                ("1YCuml", "1Y Cuml", ",.0f"), ("Wcut", "Wcut", ".1f"),
+                ("OOIP", "OOIP", ",.0f"), ("RFTD", "RFTD", ".3f"),
+                ("URF", "URF", ".3f"),
+            ]:
+                if pd.notna(brow.get(col)):
+                    tip_parts.append(f"{label}: {brow[col]:{fmt}}")
+            tip_text = "<br>".join(tip_parts)
 
-                folium.GeoJson(
-                    brow.geometry.__geo_interface__,
-                    style_function=lambda _, fc=fill_color: {
-                        "fillColor": fc, "fillOpacity": 0.45,
-                        "color": fc, "weight": 1, "opacity": 0.6,
-                    },
-                    tooltip=folium.Tooltip(tip_text, sticky=True,
-                        style="font-size:11px;padding:4px 8px;background:rgba(255,255,255,0.92);border:1px solid #2e7d32;border-radius:3px;"),
-                ).add_to(buffer_fg)
+            folium.GeoJson(
+                brow.geometry.__geo_interface__,
+                style_function=lambda _, fc=fill_color: {
+                    "fillColor": fc, "fillOpacity": 0.4,
+                    "color": fc, "weight": 1, "opacity": 0.5,
+                },
+                tooltip=folium.Tooltip(tip_text, sticky=True,
+                    style="font-size:11px;padding:4px 8px;background:rgba(255,255,255,0.92);border:1px solid #2e7d32;border-radius:3px;"),
+            ).add_to(buffer_fg)
 
-        # Filtered-out buffers (grey)
-        filtered_out = buffer_gdf[~buffer_gdf["_passes_filter"] & ~buffer_gdf["_no_analogs"]]
-        if not filtered_out.empty:
-            for bidx, brow in filtered_out.iterrows():
-                folium.GeoJson(
-                    brow.geometry.__geo_interface__,
-                    style_function=lambda _: {
-                        "fillColor": "#d3d3d3", "fillOpacity": 0.2,
-                        "color": "#aaa", "weight": 0.5, "opacity": 0.4,
-                    },
-                    tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>Filtered out",
-                        sticky=True,
-                        style="font-size:11px;padding:3px 6px;background:rgba(200,200,200,0.9);border:1px solid #888;border-radius:3px;"),
-                ).add_to(buffer_fg)
+        # Filtered-out buffers
+        filtered_buf = buffer_gdf[~buffer_gdf["_passes_filter"] & ~buffer_gdf["_no_analogs"]]
+        for bidx, brow in filtered_buf.iterrows():
+            folium.GeoJson(
+                brow.geometry.__geo_interface__,
+                style_function=lambda _: {
+                    "fillColor": "#d3d3d3", "fillOpacity": 0.15,
+                    "color": "#aaa", "weight": 0.5, "opacity": 0.3,
+                },
+                tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>Filtered out", sticky=True,
+                    style="font-size:11px;padding:3px 6px;background:rgba(200,200,200,0.9);border:1px solid #888;border-radius:3px;"),
+            ).add_to(buffer_fg)
 
-        # No-analog buffers (faint orange dashed)
-        no_analog = buffer_gdf[buffer_gdf["_no_analogs"]]
-        if not no_analog.empty:
-            for bidx, brow in no_analog.iterrows():
-                folium.GeoJson(
-                    brow.geometry.__geo_interface__,
-                    style_function=lambda _: {
-                        "fillColor": "#ffe0b2", "fillOpacity": 0.15,
-                        "color": "orange", "weight": 1, "dashArray": "5 5", "opacity": 0.5,
-                    },
-                    tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>No analogs in buffer",
-                        sticky=True,
-                        style="font-size:11px;padding:3px 6px;background:rgba(255,224,178,0.9);border:1px solid orange;border-radius:3px;"),
-                ).add_to(buffer_fg)
+        # No-analog buffers
+        no_analog_buf = buffer_gdf[buffer_gdf["_no_analogs"]]
+        for bidx, brow in no_analog_buf.iterrows():
+            folium.GeoJson(
+                brow.geometry.__geo_interface__,
+                style_function=lambda _: {
+                    "fillColor": "#ffe0b2", "fillOpacity": 0.1,
+                    "color": "orange", "weight": 1, "dashArray": "5 5", "opacity": 0.4,
+                },
+                tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>No analogs in buffer", sticky=True,
+                    style="font-size:11px;padding:3px 6px;background:rgba(255,224,178,0.9);border:1px solid orange;border-radius:3px;"),
+            ).add_to(buffer_fg)
 
         buffer_fg.add_to(m)
 
@@ -1081,6 +1058,7 @@ else:
                     style="font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);border:1px solid #333;border-radius:3px;",
                 ),
             ).add_to(well_fg)
+
         for _, row in point_wells.iterrows():
             tip_parts = [f"<b>UWI:</b> {row.get('UWI', '—')}"]
             for col, label, fmt in [("EUR", "EUR", ",.0f"), ("IP90", "IP90", ",.0f"),
@@ -1096,23 +1074,21 @@ else:
             ).add_to(well_fg)
         well_fg.add_to(m)
 
-        # Layer 5: Prospect lines — solid red, always
-        prospect_line_fg = folium.FeatureGroup(name="Prospect Wells")
-        p_lines_display = p_display.copy().to_crs(4326)
+        # Layer 5: Prospect lines — solid red, always on top
+        prospect_fg = folium.FeatureGroup(name="Prospect Wells")
 
-        # Build tooltip fields
-        pt_fields = ["Label", "_prospect_type", "Analog_Count", "Confidence",
-                     "EUR", "IP90", "1YCuml", "Wcut", "OOIP", "RFTD", "URF"]
-        pt_aliases = ["Prospect:", "Type:", "Analogs:", "Confidence:",
-                      "EUR:", "IP90:", "1Y Cuml:", "Wcut:", "OOIP:", "RFTD:", "URF:"]
-
-        # Only keep fields that exist
-        valid_pt = [(f, a) for f, a in zip(pt_fields, pt_aliases) if f in p_lines_display.columns]
-        pt_fields = [x[0] for x in valid_pt]
-        pt_aliases = [x[1] for x in valid_pt]
+        # Build clean tooltip fields from what's available
+        pt_fields_wanted = [
+            ("Label", "Prospect:"), ("_prospect_type", "Type:"),
+            ("Analog_Count", "Analogs:"), ("Confidence", "Confidence:"),
+            ("EUR", "EUR:"), ("IP90", "IP90:"), ("1YCuml", "1Y Cuml:"),
+            ("Wcut", "Wcut:"), ("OOIP", "OOIP:"), ("RFTD", "RFTD:"), ("URF", "URF:"),
+        ]
+        pt_fields = [f for f, _ in pt_fields_wanted if f in p_lines_display.columns]
+        pt_aliases = [a for f, a in pt_fields_wanted if f in p_lines_display.columns]
 
         folium.GeoJson(
-            p_lines_display.to_json(),
+            p_lines_display[pt_fields + ["geometry"]].to_json(),
             style_function=lambda _: {"color": "red", "weight": 3, "opacity": 0.9},
             highlight_function=lambda _: {"weight": 5, "color": "#ff4444"},
             tooltip=folium.GeoJsonTooltip(
@@ -1120,8 +1096,8 @@ else:
                 localize=True, sticky=True,
                 style="font-size:12px;padding:5px 10px;background:rgba(255,255,255,0.95);border:1px solid #c00;border-radius:4px;",
             ),
-        ).add_to(prospect_line_fg)
-        prospect_line_fg.add_to(m)
+        ).add_to(prospect_fg)
+        prospect_fg.add_to(m)
 
         folium.LayerControl(collapsed=True).add_to(m)
         st_folium(m, use_container_width=True, height=900, returned_objects=[])
@@ -1177,7 +1153,6 @@ else:
                 st.caption(f"Ranked by **{selected_metric}** · {len(rank_df)} prospects · "
                            f"Buffer: {buffer_distance}m · IDW²")
 
-                # Summary metrics
                 summary_cols = st.columns(3)
                 is_score = "Score" in selected_metric
                 with summary_cols[0]:
@@ -1190,7 +1165,6 @@ else:
                     v = rank_df[metric_col].iloc[-1]
                     st.metric("Worst", f"{v:,.2f}" if is_score else f"{v:,.0f}")
 
-                # Format dict
                 fmt = {
                     "EUR": "{:,.0f}", "IP90": "{:,.0f}", "1YCuml": "{:,.0f}",
                     "Wcut": "{:.1f}", "OOIP": "{:,.0f}",
@@ -1203,7 +1177,6 @@ else:
                 if "Adj Score" in rank_df.columns:
                     fmt["Adj Score"] = "{:.3f}"
 
-                # Gradient direction
                 gmap_vals = rank_df[metric_col] if not ascending else -rank_df[metric_col]
 
                 styled = rank_df.style.background_gradient(
@@ -1223,15 +1196,13 @@ else:
                 # ==================================================
                 st.markdown("---")
                 st.subheader("📈 Cumulative EUR Opportunity")
-                st.caption("Prospects ranked best to worst. Shows how much expected EUR is captured by drilling the top N.")
+                st.caption("Prospects ranked best→worst by EUR. Shows cumulative expected EUR captured by drilling top N.")
 
                 eur_ranked = rank_df.dropna(subset=["EUR"]).copy()
                 if not eur_ranked.empty:
-                    # Re-sort by EUR descending for cumulative view
                     eur_ranked = eur_ranked.sort_values("EUR", ascending=False).reset_index(drop=True)
                     eur_ranked["Cumul EUR"] = eur_ranked["EUR"].cumsum()
                     eur_ranked["Prospect #"] = range(1, len(eur_ranked) + 1)
-                    total_eur = eur_ranked["EUR"].sum()
 
                     fig_cum = go.Figure()
                     fig_cum.add_trace(go.Scatter(
@@ -1241,7 +1212,7 @@ else:
                         line=dict(color="#2e7d32", width=2),
                         marker=dict(size=6, color="#2e7d32"),
                         text=eur_ranked["Label"],
-                        hovertemplate="<b>%{text}</b><br>Prospect #%{x}<br>Cumul EUR: %{y:,.0f} bbl<extra></extra>",
+                        hovertemplate="<b>%{text}</b><br>#%{x}<br>Cumul EUR: %{y:,.0f} bbl<extra></extra>",
                     ))
                     fig_cum.update_layout(
                         xaxis_title="Prospects Drilled (best → worst)",
@@ -1251,8 +1222,6 @@ else:
                         hovermode="x unified",
                     )
                     st.plotly_chart(fig_cum, use_container_width=True)
-                else:
-                    st.info("No EUR data to plot.")
 
                 # ==================================================
                 # PROSPECT DETAIL PANEL
@@ -1280,7 +1249,9 @@ else:
                     dc9, dc10, dc11 = st.columns(3)
                     dc9.metric("Confidence", dr.get("Confidence", "—"))
                     if pd.notna(dr.get("Rank Δ")):
-                        dc10.metric("Rank Stability", f"{dr['Rank Δ']:+.0f} ranks")
+                        delta_val = int(dr["Rank Δ"])
+                        dc10.metric("Rank Stability",
+                                    f"{delta_val:+d} ranks" if delta_val != 0 else "Stable")
                     else:
                         dc10.metric("Rank Stability", "—")
                     if "Adj Score" in dr.index and pd.notna(dr.get("Adj Score")):
@@ -1341,7 +1312,6 @@ else:
                         if pd.isna(val) or pd.isna(med_val) or med_val == 0:
                             continue
                         pct_diff = ((val - med_val) / abs(med_val)) * 100
-                        # For inverted metrics, flip the sign so positive = good
                         if tm in tornado_invert:
                             pct_diff = -pct_diff
                         t_labels.append(tm)
@@ -1359,7 +1329,7 @@ else:
                         fig_tornado.update_layout(
                             xaxis_title="% Deviation from Median (→ better)",
                             height=max(220, len(t_labels) * 40),
-                            margin=dict(l=80, r=40, t=10, b=30),
+                            margin=dict(l=80, r=60, t=10, b=30),
                             yaxis=dict(autorange="reversed"),
                         )
                         st.plotly_chart(fig_tornado, use_container_width=True)
@@ -1369,36 +1339,30 @@ else:
                     bullet_metrics = ["EUR", "IP90", "1YCuml", "Wcut", "OOIP", "URF", "RFTD"]
                     bullet_invert = {"Wcut", "URF", "RFTD"}
 
-                    n_bullets = sum(1 for bm in bullet_metrics
-                                    if pd.notna(dr.get(bm)) and rank_df[bm].dropna().shape[0] >= 3)
+                    bullets_available = [bm for bm in bullet_metrics
+                                         if pd.notna(dr.get(bm)) and rank_df[bm].dropna().shape[0] >= 3]
+                    n_bullets = len(bullets_available)
 
                     if n_bullets > 0:
                         fig_bullet = make_subplots(
                             rows=n_bullets, cols=1,
-                            subplot_titles=[],
-                            vertical_spacing=0.08,
+                            vertical_spacing=0.12 / max(n_bullets, 1),
                         )
-                        row_i = 0
-                        for bm in bullet_metrics:
-                            val = dr.get(bm)
+                        for row_i, bm in enumerate(bullets_available, 1):
+                            val = dr[bm]
                             col_data = rank_df[bm].dropna()
-                            if pd.isna(val) or col_data.shape[0] < 3:
-                                continue
-                            row_i += 1
                             p10 = col_data.quantile(0.9)
                             p50 = col_data.median()
                             p90 = col_data.quantile(0.1)
                             lo = col_data.min()
                             hi = col_data.max()
 
-                            # Background range bar
+                            # Full range
                             fig_bullet.add_trace(go.Bar(
                                 x=[hi - lo], y=[bm], base=[lo],
                                 orientation="h",
                                 marker_color="#e0e0e0",
-                                showlegend=False,
-                                hoverinfo="skip",
-                                width=0.6,
+                                showlegend=False, hoverinfo="skip", width=0.6,
                             ), row=row_i, col=1)
 
                             # P90-P10 range
@@ -1406,9 +1370,7 @@ else:
                                 x=[p10 - p90], y=[bm], base=[p90],
                                 orientation="h",
                                 marker_color="#bdbdbd",
-                                showlegend=False,
-                                hoverinfo="skip",
-                                width=0.6,
+                                showlegend=False, hoverinfo="skip", width=0.6,
                             ), row=row_i, col=1)
 
                             # Median line
@@ -1420,35 +1382,35 @@ else:
                                 hovertemplate=f"Median: {p50:,.2f}<extra></extra>",
                             ), row=row_i, col=1)
 
-                            # Prospect value marker
-                            marker_color = "#2e7d32" if bm not in bullet_invert else (
-                                "#2e7d32" if val <= p50 else "#c62828"
-                            )
-                            if bm not in bullet_invert:
-                                marker_color = "#2e7d32" if val >= p50 else "#c62828"
+                            # Value marker
+                            if bm in bullet_invert:
+                                mc = "#2e7d32" if val <= p50 else "#c62828"
+                            else:
+                                mc = "#2e7d32" if val >= p50 else "#c62828"
 
                             fig_bullet.add_trace(go.Scatter(
                                 x=[val], y=[bm],
                                 mode="markers",
-                                marker=dict(symbol="diamond", size=12, color=marker_color,
+                                marker=dict(symbol="diamond", size=12, color=mc,
                                             line=dict(width=1, color="white")),
                                 showlegend=False,
                                 hovertemplate=f"<b>{bm}</b>: {val:,.2f}<extra></extra>",
                             ), row=row_i, col=1)
 
                         fig_bullet.update_layout(
-                            height=max(200, n_bullets * 60),
+                            height=max(200, n_bullets * 65),
                             margin=dict(l=80, r=30, t=10, b=10),
                             barmode="overlay",
                         )
                         st.plotly_chart(fig_bullet, use_container_width=True)
-                        st.caption("◆ = prospect value · | = median · Dark grey = P90–P10 range · Light grey = full range")
+                        st.caption("◆ = prospect value · **|** = median · Dark grey = P90–P10 · Light grey = full range")
 
-                    # ---- Cumulative EUR curve with selection highlighted ----
+                    # ---- Cumulative EUR with selection ----
                     st.markdown("##### Position on Cumulative EUR Curve")
                     if not eur_ranked.empty and detail_label in eur_ranked["Label"].values:
-                        sel_idx = eur_ranked[eur_ranked["Label"] == detail_label]["Prospect #"].iloc[0]
-                        sel_cum = eur_ranked[eur_ranked["Label"] == detail_label]["Cumul EUR"].iloc[0]
+                        sel_row = eur_ranked[eur_ranked["Label"] == detail_label].iloc[0]
+                        sel_num = sel_row["Prospect #"]
+                        sel_cum = sel_row["Cumul EUR"]
 
                         fig_cum2 = go.Figure()
                         fig_cum2.add_trace(go.Scatter(
@@ -1456,16 +1418,16 @@ else:
                             y=eur_ranked["Cumul EUR"],
                             mode="lines",
                             line=dict(color="#2e7d32", width=2),
-                            hovertemplate="Prospect #%{x}<br>Cumul EUR: %{y:,.0f}<extra></extra>",
+                            hovertemplate="#%{x}<br>Cumul EUR: %{y:,.0f}<extra></extra>",
                         ))
                         fig_cum2.add_trace(go.Scatter(
-                            x=[sel_idx], y=[sel_cum],
+                            x=[sel_num], y=[sel_cum],
                             mode="markers+text",
                             marker=dict(size=14, color="red", symbol="star"),
                             text=[detail_label],
                             textposition="top center",
                             textfont=dict(size=11, color="red"),
-                            hovertemplate=f"<b>{detail_label}</b><br>#{sel_idx}<br>Cumul EUR: {sel_cum:,.0f}<extra></extra>",
+                            hovertemplate=f"<b>{detail_label}</b><br>#{sel_num}<br>Cumul EUR: {sel_cum:,.0f}<extra></extra>",
                             showlegend=False,
                         ))
                         fig_cum2.update_layout(
