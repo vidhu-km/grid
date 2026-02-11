@@ -258,8 +258,6 @@ section_enriched = compute_section_metrics(proximal_wells, grid_gdf)
 # ==========================================================
 # PROSPECT ANALYSIS MODE
 # ==========================================================
-else:
-
     # ---- Buffer distance slider ----
     st.sidebar.markdown("---")
     st.sidebar.subheader("📏 Buffer Distance")
