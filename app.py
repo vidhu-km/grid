@@ -125,7 +125,7 @@ def load_data():
 
     grid["geometry"] = grid.geometry.simplify(50, preserve_topology=True)
 
-    return lines, points, grid, units, infills, lease_lines, prod_all
+    return lines, points, grid, units, infills, lease_lines, prod_all, land
 
 
 (
