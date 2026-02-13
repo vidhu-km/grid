@@ -392,7 +392,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m)
         overlaps = gpd.overlay(
             lsds[["LSD", "OOIP", "RFTD", "URF", "geometry"]],
             buffer_clip_gdf,
-            how="interlsd",
+            how="intersection",
         )
 
         if not overlaps.empty:
