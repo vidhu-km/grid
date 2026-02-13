@@ -30,7 +30,7 @@ NULL_STYLE = {
 }
 
 WELL_LEVEL_METRICS = ["EUR", "IP90", "1YCuml", "Wcut"]
-LSD_LEVEL_METRICS = ["OOIP", "RFTD", "URF"]
+SECTION_LEVEL_METRICS = ["OOIP", "RFTD", "URF"]
 
 DEFAULT_BUFFER_M = 500
 CONFIDENCE_HIGH = 8
@@ -90,7 +90,7 @@ def confidence_tier(count):
 def load_data():
     lines = gpd.read_file("lines.shp")
     points = gpd.read_file("points.shp")
-    grid = gpd.read_file("lsdooipgrid.shp")
+    grid = gpd.read_file("ooipsectiongrid.shp")
     infills = gpd.read_file("2M_Infills_plyln.shp")
     lease_lines = gpd.read_file("2M_LL_plyln.shp")
     units = gpd.read_file("Bakken Units.shp")
@@ -104,13 +104,13 @@ def load_data():
             gdf.set_crs(epsg=26913, inplace=True)
         gdf.to_crs(epsg=26913, inplace=True)
 
-    grid["LSD"] = grid["LSD"].astype(str).str.strip()
+    grid["Section"] = grid["Section"].astype(str).str.strip()
     grid["OOIP"] = pd.to_numeric(grid["OOIP"], errors="coerce")
 
     PROD_NUMERIC = ["Cuml", "EUR", "IP90", "1YCuml", "Wcut"]
     for df in [prod_in, prod_out]:
         df["UWI"] = df["UWI"].astype(str).str.strip()
-        df["LSD"] = df["LSD"].astype(str).str.strip()
+        df["Section"] = df["Section"].astype(str).str.strip()
         for col in PROD_NUMERIC:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -176,13 +176,13 @@ proximal_wells = gpd.GeoDataFrame(proximal_wells, geometry="geometry", crs=exist
 proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
 # ==========================================================
-# LSD enrichment
+# Section enrichment
 # ==========================================================
 
-@st.cache_data(show_spinner="Computing lsd metrics …")
-def compute_lsd_metrics(_proximal_wells, _grid_df):
+@st.cache_data(show_spinner="Computing section metrics …")
+def compute_section_metrics(_proximal_wells, _grid_df):
     aw = _proximal_wells.copy()
-    g = _grid_df[["LSD", "OOIP", "geometry"]].copy()
+    g = _grid_df[["Section", "OOIP", "geometry"]].copy()
 
     endpoints = []
     for idx, row in aw.iterrows():
@@ -208,49 +208,49 @@ def compute_lsd_metrics(_proximal_wells, _grid_df):
 
     joined = gpd.sjoin(endpoint_gdf, g, how="left", predicate="within")
 
-    lsd_col = None
+    sec_col = None
     for c in joined.columns:
-        if "LSD" in c and c.endswith("right"):
-            lsd_col = c
+        if "Section" in c and c.endswith("right"):
+            sec_col = c
             break
-    if lsd_col is None:
+    if sec_col is None:
         for c in joined.columns:
-            if c == "LSD" or (c.startswith("LSD") and c != "LSD_left"):
-                lsd_col = c
+            if c == "Section" or (c.startswith("Section") and c != "Section_left"):
+                sec_col = c
                 break
-    if lsd_col and lsd_col != "Assigned_LSD":
-        joined = joined.rename(columns={lsd_col: "Assigned_LSD"})
+    if sec_col and sec_col != "Assigned_Section":
+        joined = joined.rename(columns={sec_col: "Assigned_Section"})
 
-    keep_cols = [c for c in ["UWI", "Assigned_LSD", "EUR", "IP90", "1YCuml",
+    keep_cols = [c for c in ["UWI", "Assigned_Section", "EUR", "IP90", "1YCuml",
                              "Wcut", "Cuml"] if c in joined.columns]
     ws = joined[keep_cols].drop_duplicates(subset="UWI", keep="first")
 
-    lsd_agg = (
-        ws.groupby("Assigned_LSD")
+    section_agg = (
+        ws.groupby("Assigned_Section")
         .agg(
             Well_Count=("UWI", "count"),
-            LSD_Cuml=("Cuml", "sum"),
-            LSD_EUR=("EUR", "sum"),
+            Section_Cuml=("Cuml", "sum"),
+            Section_EUR=("EUR", "sum"),
             Avg_EUR=("EUR", "mean"),
             Avg_IP90=("IP90", "mean"),
             Avg_1YCuml=("1YCuml", "mean"),
             Avg_Wcut=("Wcut", "mean"),
         )
         .reset_index()
-        .rename(columns={"Assigned_LSD": "LSD"})
+        .rename(columns={"Assigned_Section": "Section"})
     )
 
-    g = g.merge(lsd_agg, on="LSD", how="left")
+    g = g.merge(section_agg, on="Section", how="left")
     ooip_safe = g["OOIP"].replace(0, np.nan)
-    g["RFTD"] = g["LSD_Cuml"] / ooip_safe
-    g["URF"] = g["LSD_EUR"] / ooip_safe
+    g["RFTD"] = g["Section_Cuml"] / ooip_safe
+    g["URF"] = g["Section_EUR"] / ooip_safe
     for col in ["RFTD", "URF"]:
         g[col] = g[col].replace([np.inf, -np.inf], np.nan)
 
     return g
 
 
-lsd_enriched = compute_lsd_metrics(proximal_wells, grid_gdf)
+section_enriched = compute_section_metrics(proximal_wells, grid_gdf)
 
 # ==========================================================
 # PROSPECT ANALYSIS
@@ -265,15 +265,15 @@ buffer_distance = st.sidebar.slider(
 
 # ---- Gradient selector ----
 st.sidebar.markdown("---")
-st.sidebar.subheader("🗺️ LSD Grid Gradient")
+st.sidebar.subheader("🗺️ Section Grid Gradient")
 GRADIENT_OPTIONS = ["None", "OOIP", "Avg EUR", "Avg IP90", "Avg 1YCuml",
-                    "Avg Wcut", "LSD Cuml", "RFTD", "URF"]
+                    "Avg Wcut", "Section Cuml", "RFTD", "URF"]
 GRADIENT_COL_MAP = {
     "OOIP": "OOIP", "Avg EUR": "Avg_EUR", "Avg IP90": "Avg_IP90",
     "Avg 1YCuml": "Avg_1YCuml", "Avg Wcut": "Avg_Wcut",
-    "LSD Cuml": "LSD_Cuml", "RFTD": "RFTD", "URF": "URF",
+    "Section Cuml": "Section_Cuml", "RFTD": "RFTD", "URF": "URF",
 }
-lsd_gradient = st.sidebar.selectbox("Colour lsds by", GRADIENT_OPTIONS, key="p_gradient")
+section_gradient = st.sidebar.selectbox("Colour sections by", GRADIENT_OPTIONS, key="p_gradient")
 
 # ---- Build prospects ----
 prospect_frames = []
@@ -291,10 +291,10 @@ prospects = gpd.GeoDataFrame(prospects, geometry="geometry", crs=infills_gdf.crs
 
 # ---- Prospect analysis with IDW ----
 @st.cache_data(show_spinner="Analysing prospects (IDW²) …")
-def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m):
+def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffer_m):
     pros = _prospects.copy()
     prox = _proximal_wells.copy()
-    lsds = _lsd_enriched.copy()
+    sections = _section_enriched.copy()
 
     # Pre-compute midpoint coordinates for proximal wells for fast distance calc
     prox_mid_x = prox["_midpoint"].apply(lambda mp: mp.x if mp is not None else np.nan)
@@ -307,18 +307,18 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m)
 
         prospect_mid = midpoint_of_geom(geom)
         if prospect_mid is None:
-            for col in WELL_LEVEL_METRICS + LSD_LEVEL_METRICS:
+            for col in WELL_LEVEL_METRICS + SECTION_LEVEL_METRICS:
                 record[col] = np.nan
             record["Proximal_Count"] = 0
             record["_proximal_uwis"] = ""
-            record["_lsd_label"] = "Unknown"
+            record["_section_label"] = "Unknown"
             record["EUR_median"] = np.nan
             record["EUR_p10"] = np.nan
             record["EUR_p90"] = np.nan
             results.append(record)
             continue
 
-        # LSD label from endpoint
+        # Section label from endpoint
         if geom.geom_type == "MultiLineString":
             endpoint = Point(list(geom.geoms[-1].coords)[-1])
         elif geom.geom_type == "LineString":
@@ -327,11 +327,11 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m)
             endpoint = prospect_mid
 
         ep_gdf = gpd.GeoDataFrame([{"geometry": endpoint}], crs=pros.crs)
-        lsd_hit = gpd.sjoin(ep_gdf, lsds[["LSD", "geometry"]], how="left", predicate="within")
-        if not lsd_hit.empty and pd.notna(lsd_hit.iloc[0].get("LSD")):
-            record["_lsd_label"] = str(lsd_hit.iloc[0]["LSD"])
+        sec_hit = gpd.sjoin(ep_gdf, sections[["Section", "geometry"]], how="left", predicate="within")
+        if not sec_hit.empty and pd.notna(sec_hit.iloc[0].get("Section")):
+            record["_section_label"] = str(sec_hit.iloc[0]["Section"])
         else:
-            record["_lsd_label"] = "Unknown"
+            record["_section_label"] = "Unknown"
 
         # 1. Create the buffer around the entire prospect line
         buffer_geom = geom.buffer(_buffer_m)
@@ -385,22 +385,22 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m)
             record["EUR_p10"] = np.nan
             record["EUR_p90"] = np.nan
 
-        # LSD-level metrics — simple mean of overlapping lsds
+        # Section-level metrics — simple mean of overlapping sections
         buffer_series = gpd.GeoSeries([buffer_geom], crs=pros.crs)
         buffer_clip_gdf = gpd.GeoDataFrame(geometry=buffer_series)
 
         overlaps = gpd.overlay(
-            lsds[["LSD", "OOIP", "RFTD", "URF", "geometry"]],
+            sections[["Section", "OOIP", "RFTD", "URF", "geometry"]],
             buffer_clip_gdf,
             how="intersection",
         )
 
         if not overlaps.empty:
-            for col in LSD_LEVEL_METRICS:
+            for col in SECTION_LEVEL_METRICS:
                 valid = overlaps[col].dropna()
                 record[col] = valid.mean() if not valid.empty else np.nan
         else:
-            for col in LSD_LEVEL_METRICS:
+            for col in SECTION_LEVEL_METRICS:
                 record[col] = np.nan
 
         results.append(record)
@@ -408,25 +408,25 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m)
     results_df = pd.DataFrame(results)
 
     # Deduplicate labels
-    label_counts = results_df["_lsd_label"].value_counts()
+    label_counts = results_df["_section_label"].value_counts()
     dup_labels = label_counts[label_counts > 1].index
     for label in dup_labels:
-        mask = results_df["_lsd_label"] == label
+        mask = results_df["_section_label"] == label
         indices = results_df[mask].index
         for i, row_idx in enumerate(indices, 1):
-            results_df.loc[row_idx, "_lsd_label"] = f"{label}-{i}"
+            results_df.loc[row_idx, "_section_label"] = f"{label}-{i}"
 
     results_df = results_df.set_index("_idx")
     return results_df
 
-prospect_metrics = analyze_prospects_idw(prospects, proximal_wells, lsd_enriched, buffer_distance)
+prospect_metrics = analyze_prospects_idw(prospects, proximal_wells, section_enriched, buffer_distance)
 
 prospects = prospects.join(
     prospect_metrics.drop(columns=["_prospect_type"], errors="ignore")
 )
-prospects["Label"] = prospects["_lsd_label"]
+prospects["Label"] = prospects["_section_label"]
 
-for col in WELL_LEVEL_METRICS + LSD_LEVEL_METRICS:
+for col in WELL_LEVEL_METRICS + SECTION_LEVEL_METRICS:
     if col in prospects.columns:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
@@ -672,11 +672,11 @@ else:
     p["_rank_pct"] = np.nan
 
 # ---- Prepare display data ----
-lsd_display = lsd_enriched.copy().to_crs(4326)
+section_display = section_enriched.copy().to_crs(4326)
 units_display = units_gdf.copy().to_crs(4326)
 
 existing_display_cols = ["UWI", "geometry"] + [
-    c for c in ["EUR", "IP90", "1YCuml", "Wcut", "LSD"] if c in proximal_wells.columns
+    c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in proximal_wells.columns
 ]
 existing_display = proximal_wells[existing_display_cols].copy().to_crs(4326)
 
@@ -758,11 +758,11 @@ with col_map:
     m = folium.Map(location=[centre_lat, centre_lon], zoom_start=11, tiles="CartoDB positron")
     MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 
-    # Layer 1: LSD grid
-    if lsd_gradient != "None":
-        grad_col = GRADIENT_COL_MAP[lsd_gradient]
-        grad_vals = lsd_display[grad_col].dropna()
-        lower_is_better = lsd_gradient in ["Avg Wcut", "RFTD", "URF"]
+    # Layer 1: Section grid
+    if section_gradient != "None":
+        grad_col = GRADIENT_COL_MAP[section_gradient]
+        grad_vals = section_display[grad_col].dropna()
+        lower_is_better = section_gradient in ["Avg Wcut", "RFTD", "URF"]
 
         if not grad_vals.empty:
             colors = (["#006837", "#78c679", "#ffffcc"] if lower_is_better
@@ -772,37 +772,37 @@ with col_map:
                 vmin=float(grad_vals.min()),
                 vmax=float(grad_vals.max()),
             ).to_step(n=7)
-            colormap.caption = lsd_gradient
+            colormap.caption = section_gradient
             m.add_child(colormap)
 
-            def lsd_style(feature):
+            def section_style(feature):
                 val = feature["properties"].get(grad_col)
                 if val is None or (isinstance(val, float) and np.isnan(val)):
                     return NULL_STYLE
                 return {"fillColor": colormap(val), "fillOpacity": 0.45,
                         "color": "white", "weight": 0.3}
         else:
-            lsd_style = lambda _: NULL_STYLE
+            section_style = lambda _: NULL_STYLE
     else:
-        lsd_style = lambda _: NULL_STYLE
+        section_style = lambda _: NULL_STYLE
 
-    lsd_fields = ["LSD", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
+    sec_fields = ["Section", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
                   "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF"]
-    lsd_aliases = ["LSD:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
+    sec_aliases = ["Section:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
                   "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:"]
 
-    lsd_fg = folium.FeatureGroup(name="LSD Grid", show=(lsd_gradient != "None"))
+    section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
     folium.GeoJson(
-        lsd_display.to_json(), name="LSDs",
-        style_function=lsd_style,
+        section_display.to_json(), name="Sections",
+        style_function=section_style,
         highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
         tooltip=folium.GeoJsonTooltip(
-            fields=lsd_fields, aliases=lsd_aliases,
+            fields=sec_fields, aliases=sec_aliases,
             localize=True, sticky=True,
             style="font-size:11px;padding:4px 8px;background:rgba(255,255,255,0.9);border:1px solid #333;border-radius:3px;",
         ),
-    ).add_to(lsd_fg)
-    lsd_fg.add_to(m)
+    ).add_to(section_fg)
+    section_fg.add_to(m)
 
     # Layer 2: Units (on by default)
     units_fg = folium.FeatureGroup(name="Units", show=True)
@@ -954,7 +954,7 @@ with col_map:
     if not line_wells.empty:
         wl_fields = ["UWI"]
         wl_aliases = ["UWI:"]
-        for wf, wa in [("EUR", "EUR:"), ("IP90", "IP90:"), ("LSD", "LSD:")]:
+        for wf, wa in [("EUR", "EUR:"), ("IP90", "IP90:"), ("Section", "Section:")]:
             if wf in line_wells.columns:
                 wl_fields.append(wf)
                 wl_aliases.append(wa)
