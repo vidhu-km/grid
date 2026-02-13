@@ -654,6 +654,7 @@ else:
 # ---- Prepare display data ----
 section_display = section_enriched.copy().to_crs(4326)
 units_display = units_gdf.copy().to_crs(4326)
+land_display = land_gdf.copy().to_crs(4326)
 
 existing_display_cols = ["UWI", "geometry"] + [
     c for c in ["EUR", "IP90", "1YCuml", "Wcut", "Section"] if c in proximal_wells.columns
