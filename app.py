@@ -252,6 +252,9 @@ GRADIENT_COL_MAP = {
 }
 section_gradient = st.sidebar.selectbox("Colour sections by", GRADIENT_OPTIONS, key="p_gradient")
 
+show_infills = st.sidebar.checkbox("Show Infills", value=True)
+show_lease_lines = st.sidebar.checkbox("Show Lease Lines", value=True)
+
 # ---- Build prospects ----
 prospect_frames = []
 if show_infills:
