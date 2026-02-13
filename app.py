@@ -141,11 +141,7 @@ st.sidebar.title("Map Settings")
 # ==========================================================
 # Build the proximal well pool
 # ==========================================================
-frames = []
-
-prod_pool = pd.concat(frames, ignore_index=True)
-prod_pool = prod_pool.drop_duplicates(subset="UWI", keep="first")
-
+prod_pool = prod_all_df.copy()
 lines_with_uwi = lines_gdf[["UWI", "geometry"]].copy()
 points_with_uwi = points_gdf[["UWI", "geometry"]].copy()
 points_only = points_with_uwi[~points_with_uwi["UWI"].isin(lines_with_uwi["UWI"])]
