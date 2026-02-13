@@ -977,7 +977,7 @@ with col_map:
                 tip_parts.append(f"<b>{label}:</b> {row[col]:{fmt}}")
         folium.CircleMarker(
             location=[row.geometry.y, row.geometry.x],
-            radius=4, color="black", fill=True, fill_color="black",
+            radius=1, color="black", fill=True, fill_color="black",
             fill_opacity=0.7, weight=1,
             tooltip=folium.Tooltip("<br>".join(tip_parts), sticky=True,
                 style="font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);border:1px solid #333;border-radius:3px;"),
