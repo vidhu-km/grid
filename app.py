@@ -812,72 +812,139 @@ with col_map:
     ).add_to(units_fg)
     units_fg.add_to(m)
 
-    # Layer 3: Buffers
-    green_cmap = cm.LinearColormap(
-        colors=["#f7fcf5", "#74c476", "#00441b"],
-        vmin=0, vmax=1,
-    )
+        # Layer 3: Buffers (MATCH TABLE COLOUR LOGIC EXACTLY)
 
     buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 
+    # Get metric values for passing prospects (same as table)
+    metric_vals = p[p["_passes_filter"]][metric_col].dropna()
+
+    if not metric_vals.empty:
+        vmin = float(metric_vals.min())
+        vmax = float(metric_vals.max())
+
+        # Handle inversion exactly like table
+        if ascending:
+            vmin, vmax = -vmax, -vmin
+
+        # YlGn equivalent (matches table look)
+        table_cmap = cm.LinearColormap(
+            colors=["#ffffe5", "#78c679", "#006837"],
+            vmin=vmin,
+            vmax=vmax,
+        )
+    else:
+        table_cmap = None
+
+    # -------------------------
     # Passing buffers
+    # -------------------------
     passing_buf = buffer_gdf[buffer_gdf["_passes_filter"]].copy()
+
     for bidx, brow in passing_buf.iterrows():
-        rank_pct = brow["_rank_pct"] if pd.notna(brow["_rank_pct"]) else 0.5
-        fill_color = green_cmap(rank_pct)
+
+        if table_cmap is not None and pd.notna(brow.get(metric_col)):
+            val = brow[metric_col]
+            if ascending:
+                val = -val
+            fill_color = table_cmap(val)
+        else:
+            fill_color = "#cccccc"
 
         tip_parts = [
             f"<b>{brow['Label']}</b>",
             f"Proximal Wells: {brow.get('Proximal_Count', '—')}",
             f"Confidence: {brow.get('Confidence', '—')}",
         ]
+
         for col, label, fmt in [
-            ("EUR", "EUR", ",.0f"), ("IP90", "IP90", ",.0f"),
-            ("1YCuml", "1Y Cuml", ",.0f"), ("Wcut", "Wcut", ".1f"),
-            ("OOIP", "OOIP", ",.0f"), ("RFTD", "RFTD", ".3f"),
+            ("EUR", "EUR", ",.0f"),
+            ("IP90", "IP90", ",.0f"),
+            ("1YCuml", "1Y Cuml", ",.0f"),
+            ("Wcut", "Wcut", ".1f"),
+            ("OOIP", "OOIP", ",.0f"),
+            ("RFTD", "RFTD", ".3f"),
             ("URF", "URF", ".3f"),
         ]:
             if pd.notna(brow.get(col)):
                 tip_parts.append(f"{label}: {brow[col]:{fmt}}")
+
         tip_text = "<br>".join(tip_parts)
 
         folium.GeoJson(
             brow.geometry.__geo_interface__,
             style_function=lambda _, fc=fill_color: {
-                "fillColor": fc, "fillOpacity": 0.4,
-                "color": fc, "weight": 1, "opacity": 0.5,
+                "fillColor": fc,
+                "fillOpacity": 0.4,
+                "color": fc,
+                "weight": 1,
+                "opacity": 0.6,
             },
-            tooltip=folium.Tooltip(tip_text, sticky=True,
-                style="font-size:11px;padding:4px 8px;background:rgba(255,255,255,0.92);border:1px solid #2e7d32;border-radius:3px;"),
+            tooltip=folium.Tooltip(
+                tip_text,
+                sticky=True,
+                style="font-size:11px;padding:4px 8px;"
+                      "background:rgba(255,255,255,0.92);"
+                      "border:1px solid #2e7d32;"
+                      "border-radius:3px;",
+            ),
         ).add_to(buffer_fg)
 
+    # -------------------------
     # Filtered-out buffers
-    filtered_buf = buffer_gdf[~buffer_gdf["_passes_filter"] & ~buffer_gdf["_no_proximal"]]
+    # -------------------------
+    filtered_buf = buffer_gdf[
+        ~buffer_gdf["_passes_filter"] & ~buffer_gdf["_no_proximal"]
+    ]
+
     for bidx, brow in filtered_buf.iterrows():
         folium.GeoJson(
             brow.geometry.__geo_interface__,
             style_function=lambda _: {
-                "fillColor": "#d3d3d3", "fillOpacity": 0.15,
-                "color": "#aaa", "weight": 0.5, "opacity": 0.3,
+                "fillColor": "#d3d3d3",
+                "fillOpacity": 0.15,
+                "color": "#aaa",
+                "weight": 0.5,
+                "opacity": 0.3,
             },
-            tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>Filtered out", sticky=True,
-                style="font-size:11px;padding:3px 6px;background:rgba(200,200,200,0.9);border:1px solid #888;border-radius:3px;"),
+            tooltip=folium.Tooltip(
+                f"<b>{brow['Label']}</b><br>Filtered out",
+                sticky=True,
+                style="font-size:11px;padding:3px 6px;"
+                      "background:rgba(200,200,200,0.9);"
+                      "border:1px solid #888;"
+                      "border-radius:3px;",
+            ),
         ).add_to(buffer_fg)
 
+    # -------------------------
     # No-proximal buffers
+    # -------------------------
     no_proximal_buf = buffer_gdf[buffer_gdf["_no_proximal"]]
+
     for bidx, brow in no_proximal_buf.iterrows():
         folium.GeoJson(
             brow.geometry.__geo_interface__,
             style_function=lambda _: {
-                "fillColor": "#ffe0b2", "fillOpacity": 0.1,
-                "color": "orange", "weight": 1, "dashArray": "5 5", "opacity": 0.4,
+                "fillColor": "#ffe0b2",
+                "fillOpacity": 0.1,
+                "color": "orange",
+                "weight": 1,
+                "dashArray": "5 5",
+                "opacity": 0.4,
             },
-            tooltip=folium.Tooltip(f"<b>{brow['Label']}</b><br>No proximal wells in buffer", sticky=True,
-                style="font-size:11px;padding:3px 6px;background:rgba(255,224,178,0.9);border:1px solid orange;border-radius:3px;"),
+            tooltip=folium.Tooltip(
+                f"<b>{brow['Label']}</b><br>No proximal wells in buffer",
+                sticky=True,
+                style="font-size:11px;padding:3px 6px;"
+                      "background:rgba(255,224,178,0.9);"
+                      "border:1px solid orange;"
+                      "border-radius:3px;",
+            ),
         ).add_to(buffer_fg)
 
     buffer_fg.add_to(m)
+
 
     # Layer 4: Existing wells — thin black
     well_fg = folium.FeatureGroup(name="Existing Wells")
