@@ -94,11 +94,11 @@ def load_data():
     infills = gpd.read_file("2M_Infills_plyln.shp")
     lease_lines = gpd.read_file("2M_LL_plyln.shp")
     units = gpd.read_file("Bakken Units.shp")
+    land = gpd.read_file("Bakken Land.shp")
 
-    prod_in = pd.read_excel("well.xlsx", sheet_name="inunit")
-    prod_out = pd.read_excel("well.xlsx", sheet_name="outunit")
+    prod_all = pd.read_excel("wells.xlsx")
 
-    all_gdfs = [lines, points, grid, units, infills, lease_lines]
+    all_gdfs = [lines, points, grid, units, infills, lease_lines, land]
     for gdf in all_gdfs:
         if gdf.crs is None:
             gdf.set_crs(epsg=26913, inplace=True)
@@ -108,26 +108,29 @@ def load_data():
     grid["OOIP"] = pd.to_numeric(grid["OOIP"], errors="coerce")
 
     PROD_NUMERIC = ["Cuml", "EUR", "IP90", "1YCuml", "Wcut"]
-    for df in [prod_in, prod_out]:
-        df["UWI"] = df["UWI"].astype(str).str.strip()
-        df["Section"] = df["Section"].astype(str).str.strip()
-        for col in PROD_NUMERIC:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-            else:
-                df[col] = np.nan
+    df = prod_all
+    df["UWI"] = df["UWI"].astype(str).str.strip()
+    df["Section"] = df["Section"].astype(str).str.strip()
+    
+    PROD_NUMERIC = ["Cuml", "EUR", "IP90", "1YCuml", "Wcut"]
+    for col in PROD_NUMERIC:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        else:
+            df[col] = np.nan
+
 
     lines["UWI"] = lines["UWI"].astype(str).str.strip()
     points["UWI"] = points["UWI"].astype(str).str.strip()
 
     grid["geometry"] = grid.geometry.simplify(50, preserve_topology=True)
 
-    return lines, points, grid, units, infills, lease_lines, prod_in, prod_out
+    return lines, points, grid, units, infills, lease_lines, prod_all
 
 
 (
     lines_gdf, points_gdf, grid_gdf, units_gdf,
-    infills_gdf, lease_lines_gdf, prod_in_df, prod_out_df,
+    infills_gdf, lease_lines_gdf, prod_all_df, land_gdf,
 ) = load_data()
 
 # ==========================================================
@@ -136,31 +139,9 @@ def load_data():
 st.sidebar.title("Map Settings")
 
 # ==========================================================
-# Sidebar — Proximal Well Source
-# ==========================================================
-st.sidebar.subheader("📂 Proximal Well Source")
-show_in_unit = st.sidebar.checkbox("In-Unit Wells", value=True)
-show_out_unit = st.sidebar.checkbox("Out-of-Unit Wells", value=True)
-
-if not show_in_unit and not show_out_unit:
-    st.sidebar.error("Select at least one well source.")
-    st.stop()
-
-st.sidebar.subheader("🎯 Prospect Type")
-show_infills = st.sidebar.checkbox("2M Infills", value=True)
-show_lease_lines = st.sidebar.checkbox("2M Lease Lines", value=True)
-if not show_infills and not show_lease_lines:
-    st.sidebar.error("Select at least one prospect type.")
-    st.stop()
-
-# ==========================================================
 # Build the proximal well pool
 # ==========================================================
 frames = []
-if show_in_unit:
-    frames.append(prod_in_df)
-if show_out_unit:
-    frames.append(prod_out_df)
 
 prod_pool = pd.concat(frames, ignore_index=True)
 prod_pool = prod_pool.drop_duplicates(subset="UWI", keep="first")
@@ -334,7 +315,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
             record["_section_label"] = "Unknown"
 
         # 1. Create the buffer around the entire prospect line
-        buffer_geom = geom.buffer(_buffer_m)
+        buffer_geom = geom.buffer(_buffer_m, cap_style=2)
 
         # 2. Check which proximal well midpoints fall inside that buffer
         midpoint_mask = prox["_midpoint"].apply(
@@ -758,6 +739,22 @@ with col_map:
     m = folium.Map(location=[centre_lat, centre_lon], zoom_start=11, tiles="CartoDB positron")
     MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 
+    # Layer 0: Bakken Land
+    land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
+
+    folium.GeoJson(
+        bakken_land_display.to_json(),
+        style_function=lambda _: {
+            "fillColor": "#fff9c4",   # light yellow
+            "color": "#fff9c4",
+            "weight": 0.5,
+            "fillOpacity": 0.08,
+        },
+    ).add_to(land_fg)
+
+    land_fg.add_to(m)
+
+
     # Layer 1: Section grid
     if section_gradient != "None":
         grad_col = GRADIENT_COL_MAP[section_gradient]
@@ -954,7 +951,7 @@ with col_map:
     if not line_wells.empty:
         wl_fields = ["UWI"]
         wl_aliases = ["UWI:"]
-        for wf, wa in [("EUR", "EUR:"), ("IP90", "IP90:"), ("Section", "Section:")]:
+        for wf, wa in [("EUR"), ("IP90"), ("1YCuml"), ("Wcut"), ("Section")]:
             if wf in line_wells.columns:
                 wl_fields.append(wf)
                 wl_aliases.append(wa)
@@ -1003,7 +1000,7 @@ with col_map:
         tooltip=folium.GeoJsonTooltip(
             fields=pt_fields, aliases=pt_aliases,
             localize=True, sticky=True,
-            style="font-size:12px;padding:5px 10px;background:rgba(255,255,255,0.95);border:1px solid #c00;border-radius:4px;",
+            style="font-size:12px",
         ),
     ).add_to(prospect_fg)
     prospect_fg.add_to(m)
