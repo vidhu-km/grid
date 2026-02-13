@@ -742,7 +742,7 @@ with col_map:
     land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
 
     folium.GeoJson(
-        bakken_land_display.to_json(),
+        land_display.to_json(),
         style_function=lambda _: {
             "fillColor": "#fff9c4",   # light yellow
             "color": "#fff9c4",
