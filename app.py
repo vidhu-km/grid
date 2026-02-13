@@ -208,18 +208,18 @@ def compute_lsd_metrics(_proximal_wells, _grid_df):
 
     joined = gpd.sjoin(endpoint_gdf, g, how="left", predicate="within")
 
-    sec_col = None
+    lsd_col = None
     for c in joined.columns:
         if "LSD" in c and c.endswith("right"):
-            sec_col = c
+            lsd_col = c
             break
-    if sec_col is None:
+    if lsd_col is None:
         for c in joined.columns:
             if c == "LSD" or (c.startswith("LSD") and c != "LSD_left"):
-                sec_col = c
+                lsd_col = c
                 break
-    if sec_col and sec_col != "Assigned_LSD":
-        joined = joined.rename(columns={sec_col: "Assigned_LSD"})
+    if lsd_col and lsd_col != "Assigned_LSD":
+        joined = joined.rename(columns={lsd_col: "Assigned_LSD"})
 
     keep_cols = [c for c in ["UWI", "Assigned_LSD", "EUR", "IP90", "1YCuml",
                              "Wcut", "Cuml"] if c in joined.columns]
@@ -327,9 +327,9 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _lsd_enriched, _buffer_m)
             endpoint = prospect_mid
 
         ep_gdf = gpd.GeoDataFrame([{"geometry": endpoint}], crs=pros.crs)
-        sec_hit = gpd.sjoin(ep_gdf, lsds[["LSD", "geometry"]], how="left", predicate="within")
-        if not sec_hit.empty and pd.notna(sec_hit.iloc[0].get("LSD")):
-            record["_lsd_label"] = str(sec_hit.iloc[0]["LSD"])
+        lsd_hit = gpd.sjoin(ep_gdf, lsds[["LSD", "geometry"]], how="left", predicate="within")
+        if not lsd_hit.empty and pd.notna(lsd_hit.iloc[0].get("LSD")):
+            record["_lsd_label"] = str(lsd_hit.iloc[0]["LSD"])
         else:
             record["_lsd_label"] = "Unknown"
 
@@ -786,9 +786,9 @@ with col_map:
     else:
         lsd_style = lambda _: NULL_STYLE
 
-    sec_fields = ["LSD", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
+    lsd_fields = ["LSD", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
                   "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF"]
-    sec_aliases = ["LSD:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
+    lsd_aliases = ["LSD:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
                   "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:"]
 
     lsd_fg = folium.FeatureGroup(name="LSD Grid", show=(lsd_gradient != "None"))
@@ -797,7 +797,7 @@ with col_map:
         style_function=lsd_style,
         highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
         tooltip=folium.GeoJsonTooltip(
-            fields=sec_fields, aliases=sec_aliases,
+            fields=lsd_fields, aliases=lsd_aliases,
             localize=True, sticky=True,
             style="font-size:11px;padding:4px 8px;background:rgba(255,255,255,0.9);border:1px solid #333;border-radius:3px;",
         ),
