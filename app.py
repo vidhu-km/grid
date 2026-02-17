@@ -33,7 +33,6 @@ WELL_LEVEL_METRICS = ["EUR", "IP90", "1YCuml", "Wcut"]
 SECTION_LEVEL_METRICS = ["OOIP", "RFTD", "URF"]
 
 DEFAULT_BUFFER_M = 500
-CONFIDENCE_HIGH = 8
 
 # ==========================================================
 # Helper utilities
@@ -71,17 +70,6 @@ def midpoint_of_geom(geom):
         return geom.centroid
 
 
-def confidence_tier(count):
-    if count >= 8:
-        return "🟢 High"
-    elif count >= 4:
-        return "🟡 Medium"
-    elif count >= 2:
-        return "🟠 Low"
-    else:
-        return "🔴 Insufficient"
-
-
 # ==========================================================
 # Data loading (cached)
 # ==========================================================
@@ -112,14 +100,12 @@ def load_data():
     df = prod_all
     df["UWI"] = df["UWI"].astype(str).str.strip()
     df["Section"] = df["Section"].astype(str).str.strip()
-    
-    PROD_NUMERIC = ["Cuml", "EUR", "IP90", "1YCuml", "Wcut"]
+
     for col in PROD_NUMERIC:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         else:
             df[col] = np.nan
-
 
     lines["UWI"] = lines["UWI"].astype(str).str.strip()
     points["UWI"] = points["UWI"].astype(str).str.strip()
@@ -326,7 +312,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         midpoint_mask = prox["_midpoint"].apply(
             lambda mp: buffer_geom.contains(mp) if mp is not None else False
         )
-        
+
         hits = prox[midpoint_mask].copy()
 
         # 3. Recalculate distances for the IDW weighting (Prospect Mid to Well Mid)
@@ -415,8 +401,6 @@ prospects["Label"] = prospects["_section_label"]
 for col in WELL_LEVEL_METRICS + SECTION_LEVEL_METRICS:
     if col in prospects.columns:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
-
-prospects["Confidence"] = prospects["Proximal_Count"].fillna(0).apply(confidence_tier)
 
 # ---- Filters ----
 st.sidebar.markdown("---")
@@ -529,16 +513,10 @@ if selected_metric == "High-Grade Score" and total_weight == 100:
         + (w_rftd / 100) * z_rftd
     )
 
-    conf_factor = passing["Proximal_Count"].clip(upper=CONFIDENCE_HIGH) / CONFIDENCE_HIGH
-    hgs_adjusted = hgs * conf_factor
-
     p["HighGradeScore"] = np.nan
-    p["ConfAdjScore"] = np.nan
     p.loc[passing.index, "HighGradeScore"] = hgs
-    p.loc[passing.index, "ConfAdjScore"] = hgs_adjusted
 else:
     p["HighGradeScore"] = np.nan
-    p["ConfAdjScore"] = np.nan
 
 metric_col = "HighGradeScore" if selected_metric == "High-Grade Score" else selected_metric
 ascending = selected_metric in ["Wcut", "URF", "RFTD"]
@@ -676,7 +654,6 @@ for idx, row in p.iterrows():
         "_no_proximal": row["_no_proximal"],
         "_rank_pct": row.get("_rank_pct", np.nan),
         "Proximal_Count": row.get("Proximal_Count", 0),
-        "Confidence": row.get("Confidence", "—"),
         "EUR": row.get("EUR", np.nan),
         "IP90": row.get("IP90", np.nan),
         "1YCuml": row.get("1YCuml", np.nan),
@@ -716,14 +693,12 @@ if n_passing > 0:
         best_val = best_row[metric_col]
 
         avg_proximal = p[p["_passes_filter"]]["Proximal_Count"].mean()
-        high_conf_count = int((p[p["_passes_filter"]]["Proximal_Count"] >= CONFIDENCE_HIGH).sum())
 
         st.success(
             f"**{n_passing}** of {n_total} prospects pass filters. "
             f"Top prospect by **{selected_metric}**: **{best_name}** "
             f"({metric_col} = {best_val:,.2f}). "
-            f"Avg proximal wells/prospect: **{avg_proximal:.1f}** — "
-            f"**{high_conf_count}** with high-confidence support (≥{CONFIDENCE_HIGH} wells)."
+            f"Avg proximal wells/prospect: **{avg_proximal:.1f}**."
         )
     else:
         st.info(f"**{n_passing}** prospects pass filters but none have valid {selected_metric} data.")
@@ -751,7 +726,7 @@ with col_map:
     folium.GeoJson(
         land_display.to_json(),
         style_function=lambda _: {
-            "fillColor": "#fff9c4",   # light yellow
+            "fillColor": "#fff9c4",
             "color": "#fff9c4",
             "weight": 0.5,
             "fillOpacity": 0.2,
@@ -759,7 +734,6 @@ with col_map:
     ).add_to(land_fg)
 
     land_fg.add_to(m)
-
 
     # Layer 1: Section grid
     if section_gradient != "None":
@@ -815,7 +789,7 @@ with col_map:
     ).add_to(units_fg)
     units_fg.add_to(m)
 
-        # Layer 3: Buffers (MATCH TABLE COLOUR LOGIC EXACTLY)
+    # Layer 3: Buffers (MATCH TABLE COLOUR LOGIC EXACTLY)
 
     buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 
@@ -857,7 +831,6 @@ with col_map:
         tip_parts = [
             f"<b>{brow['Label']}</b>",
             f"Proximal Wells: {brow.get('Proximal_Count', '—')}",
-            f"Confidence: {brow.get('Confidence', '—')}",
         ]
 
         for col, label, fmt in [
@@ -924,7 +897,6 @@ with col_map:
 
     buffer_fg.add_to(m)
 
-
     # Layer 4: Existing wells — thin black
     well_fg = folium.FeatureGroup(name="Existing Wells")
     line_wells = existing_display[existing_display.geometry.type != "Point"]
@@ -968,7 +940,7 @@ with col_map:
 
     pt_fields_wanted = [
         ("Label", "Prospect:"), ("_prospect_type", "Type:"),
-        ("Proximal_Count", "Proximal Wells:"), ("Confidence", "Confidence:"),
+        ("Proximal_Count", "Proximal Wells:"),
         ("EUR", "EUR:"), ("IP90", "IP90:"), ("1YCuml", "1Y Cuml:"),
         ("Wcut", "Wcut:"), ("OOIP", "OOIP:"), ("RFTD", "RFTD:"), ("URF", "URF:"),
     ]
@@ -1002,14 +974,14 @@ with col_rank:
         rank_df = p[p["_passes_filter"]].copy()
 
         display_cols = [
-            "Label", "_prospect_type", "Proximal_Count", "Confidence",
+            "Label", "_prospect_type", "Proximal_Count",
             "EUR", "IP90", "1YCuml", "Wcut",
             "OOIP", "RFTD", "URF",
             "EUR_median", "EUR_p10", "EUR_p90",
             "RankStability",
         ]
         if selected_metric == "High-Grade Score":
-            display_cols.extend(["HighGradeScore", "ConfAdjScore"])
+            display_cols.append("HighGradeScore")
         if metric_col not in display_cols:
             display_cols.append(metric_col)
 
@@ -1034,7 +1006,6 @@ with col_rank:
                 "EUR_p10": "EUR P10",
                 "EUR_p90": "EUR P90",
                 "RankStability": "Rank Δ",
-                "ConfAdjScore": "Adj Score",
             }
             rank_df = rank_df.rename(columns=rename_map)
 
@@ -1062,8 +1033,6 @@ with col_rank:
             }
             if "HighGradeScore" in rank_df.columns:
                 fmt["HighGradeScore"] = "{:.3f}"
-            if "Adj Score" in rank_df.columns:
-                fmt["Adj Score"] = "{:.3f}"
 
             gmap_vals = rank_df[metric_col] if not ascending else -rank_df[metric_col]
 
@@ -1102,16 +1071,10 @@ with col_rank:
                 dc7.metric("RFTD", f"{dr['RFTD']:.3f}" if pd.notna(dr.get("RFTD")) else "—")
                 dc8.metric("Proximal", f"{dr['Proximal']:.0f}" if pd.notna(dr.get("Proximal")) else "—")
 
-                dc9, dc10, dc11 = st.columns(3)
-                dc9.metric("Confidence", dr.get("Confidence", "—"))
                 if pd.notna(dr.get("Rank Δ")):
                     delta_val = int(dr["Rank Δ"])
-                    dc10.metric("Rank Stability",
-                                f"{delta_val:+d} ranks" if delta_val != 0 else "Stable")
-                else:
-                    dc10.metric("Rank Stability", "—")
-                if "Adj Score" in dr.index and pd.notna(dr.get("Adj Score")):
-                    dc11.metric("Conf-Adj Score", f"{dr['Adj Score']:.3f}")
+                    st.metric("Rank Stability",
+                              f"{delta_val:+d} ranks" if delta_val != 0 else "Stable")
 
                 if pd.notna(dr.get("EUR P10")) and pd.notna(dr.get("EUR P90")):
                     st.caption(
