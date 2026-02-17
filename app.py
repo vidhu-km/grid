@@ -92,13 +92,14 @@ def load_data():
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
     infills = gpd.read_file("2M_Infills_plyln.shp")
+    merged = gpd.read_file("merged_inventory.shp")
     lease_lines = gpd.read_file("2M_LL_plyln.shp")
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
 
     prod_all = pd.read_excel("wells.xlsx")
 
-    all_gdfs = [lines, points, grid, units, infills, lease_lines, land]
+    all_gdfs = [lines, points, grid, units, infills, lease_lines, merged, land]
     for gdf in all_gdfs:
         if gdf.crs is None:
             gdf.set_crs(epsg=26913, inplace=True)
@@ -125,12 +126,12 @@ def load_data():
 
     grid["geometry"] = grid.geometry.simplify(50, preserve_topology=True)
 
-    return lines, points, grid, units, infills, lease_lines, prod_all, land
+    return lines, points, grid, units, infills, lease_lines, merged, prod_all, land
 
 
 (
     lines_gdf, points_gdf, grid_gdf, units_gdf,
-    infills_gdf, lease_lines_gdf, prod_all_df, land_gdf,
+    infills_gdf, lease_lines_gdf, merged_gdf, prod_all_df, land_gdf,
 ) = load_data()
 
 # ==========================================================
@@ -254,6 +255,7 @@ section_gradient = st.sidebar.selectbox("Colour sections by", GRADIENT_OPTIONS, 
 
 show_infills = st.sidebar.checkbox("Show Infills", value=True)
 show_lease_lines = st.sidebar.checkbox("Show Lease Lines", value=True)
+show_merged = st.sidebar.checkbox("Show Merged", value=True)
 
 # ---- Build prospects ----
 prospect_frames = []
@@ -265,6 +267,10 @@ if show_lease_lines:
     ll_copy = lease_lines_gdf.copy()
     ll_copy["_prospect_type"] = "Lease Line"
     prospect_frames.append(ll_copy)
+if show_lease_lines:
+    merged_copy = merged_gdf.copy()
+    merged_copy["_prospect_type"] = "Merged"
+    prospect_frames.append(merged_copy)
 
 prospects = pd.concat(prospect_frames, ignore_index=True)
 prospects = gpd.GeoDataFrame(prospects, geometry="geometry", crs=infills_gdf.crs)
