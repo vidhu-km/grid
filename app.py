@@ -882,15 +882,7 @@ with col_map:
                 "color": fc,
                 "weight": 1,
                 "opacity": 0.6,
-            },
-            tooltip=folium.Tooltip(
-                tip_text,
-                sticky=True,
-                style="font-size:11px;padding:4px 8px;"
-                      "background:rgba(255,255,255,0.92);"
-                      "border:1px solid #2e7d32;"
-                      "border-radius:3px;",
-            ),
+            }
         ).add_to(buffer_fg)
 
     # -------------------------
@@ -909,15 +901,7 @@ with col_map:
                 "color": "#aaa",
                 "weight": 0.5,
                 "opacity": 0.3,
-            },
-            tooltip=folium.Tooltip(
-                f"<b>{brow['Label']}</b><br>Filtered out",
-                sticky=True,
-                style="font-size:11px;padding:3px 6px;"
-                      "background:rgba(200,200,200,0.9);"
-                      "border:1px solid #888;"
-                      "border-radius:3px;",
-            ),
+            }
         ).add_to(buffer_fg)
 
     # -------------------------
@@ -935,15 +919,7 @@ with col_map:
                 "weight": 1,
                 "dashArray": "5 5",
                 "opacity": 0.4,
-            },
-            tooltip=folium.Tooltip(
-                f"<b>{brow['Label']}</b><br>No proximal wells in buffer",
-                sticky=True,
-                style="font-size:11px;padding:3px 6px;"
-                      "background:rgba(255,224,178,0.9);"
-                      "border:1px solid orange;"
-                      "border-radius:3px;",
-            ),
+            }
         ).add_to(buffer_fg)
 
     buffer_fg.add_to(m)
