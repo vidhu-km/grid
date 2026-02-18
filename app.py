@@ -978,7 +978,7 @@ with col_map:
             "fillColor": "#fff9c4",
             "color": "#fff9c4",
             "weight": 0.5,
-            "fillOpacity": 0.2,
+            "fillOpacity": 0.5,
         },
     ).add_to(land_fg)
     land_fg.add_to(m)
