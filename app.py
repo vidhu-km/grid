@@ -323,7 +323,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         else:
             record["_section_label"] = "Unknown"
 
-        buffer_geom = geom.buffer(_buffer_m, cap_style=2)
+        buffer_geom = geom.buffer(_buffer_m, cap_style=1)
 
         midpoint_mask = prox["_midpoint"].apply(
             lambda mp: buffer_geom.contains(mp) if mp is not None else False
