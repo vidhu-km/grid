@@ -210,8 +210,8 @@ def compute_section_metrics(_proximal_wells, _grid_df):
         ws.groupby("Assigned_Section")
         .agg(
             Well_Count=("UWI", "count"),
-            Sum_Cuml=("Cuml", "sum"),
-            Sum_EUR=("EUR", "sum"),
+            Section_Cuml=("Cuml", "sum"),
+            Section_EUR=("EUR", "sum"),
             Avg_IP90=("IP90", "mean"),
             Avg_1YCuml=("1YCuml", "mean"),
             Avg_Wcut=("Wcut", "mean"),
@@ -228,15 +228,14 @@ def compute_section_metrics(_proximal_wells, _grid_df):
     ooip_safe = g["OOIP"].replace(0, np.nan)
 
     # Simplified Calculations: Sum of Metrics / OOIP
-    g["RFTD"] = g["Sum_Cuml"] / ooip_safe
-    g["URF"] = g["Sum_EUR"] / ooip_safe
+    g["RFTD"] = g["Section_Cuml"] / ooip_safe
+    g["URF"] = g["Section_EUR"] / ooip_safe
 
     # Cleanup infinities
     for col in ["RFTD", "URF"]:
         g[col] = g[col].replace([np.inf, -np.inf], np.nan)
 
     return g
-
 
 section_enriched = compute_section_metrics(proximal_wells, grid_gdf)
 
