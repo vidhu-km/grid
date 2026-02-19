@@ -771,9 +771,9 @@ with col_map:
         section_style = lambda _: NULL_STYLE
 
     sec_fields = ["Section", "OOIP", "Well_Count", "Avg_EUR", "Avg_IP90",
-                  "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF"]
+                  "Avg_1YCuml", "Avg_Wcut", "RFTD", "URF", "Section_Cuml"]
     sec_aliases = ["Section:", "OOIP:", "Wells:", "Avg EUR:", "Avg IP90:",
-                  "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:"]
+                  "Avg 1Y Cuml:", "Avg Wcut:", "RFTD:", "URF:", "Section_Cuml"]
 
     section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
     folium.GeoJson(
