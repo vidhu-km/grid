@@ -313,7 +313,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         else:
             record["_section_label"] = "Unknown"
 
-        buffer_geom = geom.buffer(_buffer_m, cap_style=2, join_style='mitre')
+        buffer_geom = geom.buffer(_buffer_m, cap_style=2)
 
         midpoint_mask = prox["_midpoint"].apply(
             lambda mp: buffer_geom.contains(mp) if mp is not None else False
@@ -578,7 +578,7 @@ for idx, row in p.iterrows():
         "RFTD": row.get("RFTD", np.nan),
         "URF": row.get("URF", np.nan),
         metric_col: row.get(metric_col, np.nan),
-        "geometry": row.geometry.buffer(buffer_distance),
+        "geometry": row.geometry.buffer(buffer_distance, cap_style=2),
     })
 buffer_gdf = gpd.GeoDataFrame(buffer_records, crs=p.crs).to_crs(4326)
 
