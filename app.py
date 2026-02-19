@@ -153,69 +153,44 @@ proximal_wells = gpd.GeoDataFrame(proximal_wells, geometry="geometry", crs=exist
 proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
 # ==========================================================
-# Section enrichment
+# Section enrichment  — uses the Section column from the xlsx,
+#                        NOT a spatial join
 # ==========================================================
 
 @st.cache_data(show_spinner="Computing section metrics …")
 def compute_section_metrics(_proximal_wells, _grid_df):
+    """Aggregate well-level production by the *spreadsheet* Section column
+    and merge the results onto the section grid polygons."""
+
     aw = _proximal_wells.copy()
-    g = _grid_df.copy() # Use the full grid to preserve geometry/OOIP
+    g = _grid_df.copy()
 
-    # --- 1. Endpoint Logic (Unchanged) ---
-    endpoints = []
-    for idx, row in aw.iterrows():
-        geom = row.geometry
-        if geom is None or geom.is_empty:
-            endpoints.append(None)
-        elif geom.geom_type == "MultiLineString":
-            endpoints.append(Point(list(geom.geoms[-1].coords)[-1]))
-        elif geom.geom_type == "LineString":
-            endpoints.append(Point(list(geom.coords)[-1]))
-        elif geom.geom_type == "Point":
-            endpoints.append(geom)
-        else:
-            endpoints.append(geom.centroid)
-
-    aw["_endpoint"] = endpoints
-    valid = aw[aw["_endpoint"].notna()].copy()
-    endpoint_gdf = gpd.GeoDataFrame(
-        valid.drop(columns=["geometry"]),
-        geometry="_endpoint",
-        crs=_proximal_wells.crs,
-    )
-
-    # --- 2. Spatial Join ---
-    joined = gpd.sjoin(endpoint_gdf, g[["Section", "geometry"]], how="left", predicate="within")
-    
-    sec_col = "Section_right" if "Section_right" in joined.columns else "Section"
-    joined = joined.rename(columns={sec_col: "Assigned_Section"})
-
-    # --- 3. Simplified Aggregation (The Math Fix) ---
+    # ---- 1. Group wells by their xlsx Section column ----
+    # The 'Section' column was carried from prod_all_df during the merge
+    # that created proximal_wells.
     section_agg = (
-        joined.groupby("Assigned_Section")
+        aw.groupby("Section")
         .agg(
             Well_Count=("UWI", "count"),
-            Section_Cuml=("Cuml", "sum"), # Direct Sum
-            Section_EUR=("EUR", "sum"),   # Direct Sum
+            Section_Cuml=("Cuml", "sum"),
+            Section_EUR=("EUR", "sum"),
             Avg_EUR=("EUR", "mean"),
             Avg_IP90=("IP90", "mean"),
             Avg_1YCuml=("1YCuml", "mean"),
             Avg_Wcut=("Wcut", "mean"),
         )
         .reset_index()
-        .rename(columns={"Assigned_Section": "Section"})
     )
 
-    # --- 4. Merge & Calculate Recovery Factors ---
+    # ---- 2. Merge aggregated metrics onto the grid by Section ----
     g = g.merge(section_agg, on="Section", how="left")
-    
-    ooip_safe = g["OOIP"].replace(0, np.nan)
 
-    # Simplified math as requested: Sum / OOIP
+    # ---- 3. Calculate recovery factors ----
+    ooip_safe = g["OOIP"].replace(0, np.nan)
     g["RFTD"] = g["Section_Cuml"] / ooip_safe
     g["URF"] = g["Section_EUR"] / ooip_safe
 
-    # Final cleanup to ensure the map renderer doesn't crash on NaNs/Infs
+    # ---- 4. Clean up ----
     for col in ["RFTD", "URF", "Section_Cuml", "Section_EUR"]:
         g[col] = g[col].replace([np.inf, -np.inf], np.nan).fillna(0)
 
