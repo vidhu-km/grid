@@ -159,8 +159,10 @@ proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 @st.cache_data(show_spinner="Computing section metrics …")
 def compute_section_metrics(_proximal_wells, _grid_df):
     aw = _proximal_wells.copy()
-    g = _grid_df[["Section", "OOIP", "geometry"]].copy()
+    # Keep the full grid to ensure geometry and OOIP are preserved for the map
+    g = _grid_df.copy()
 
+    # --- 1. Endpoint Logic (Kept exactly as is) ---
     endpoints = []
     for idx, row in aw.iterrows():
         geom = row.geometry
@@ -183,32 +185,21 @@ def compute_section_metrics(_proximal_wells, _grid_df):
         crs=_proximal_wells.crs,
     )
 
-    joined = gpd.sjoin(endpoint_gdf, g, how="left", predicate="within")
+    # --- 2. Spatial Join ---
+    joined = gpd.sjoin(endpoint_gdf, g[["Section", "geometry"]], how="left", predicate="within")
 
-    sec_col = None
-    for c in joined.columns:
-        if "Section" in c and c.endswith("right"):
-            sec_col = c
-            break
-    if sec_col is None:
-        for c in joined.columns:
-            if c == "Section" or (c.startswith("Section") and c != "Section_left"):
-                sec_col = c
-                break
-    if sec_col and sec_col != "Assigned_Section":
-        joined = joined.rename(columns={sec_col: "Assigned_Section"})
+    # Fix potential column name shifts from the join
+    sec_col = "Section_right" if "Section_right" in joined.columns else "Section"
+    joined = joined.rename(columns={sec_col: "Assigned_Section"})
 
-    keep_cols = [c for c in ["UWI", "Assigned_Section", "EUR", "IP90", "1YCuml",
-                             "Wcut", "Cuml"] if c in joined.columns]
-    ws = joined[keep_cols].drop_duplicates(subset="UWI", keep="first")
-
+    # --- 3. Simplified Math Aggregation ---
+    # We sum the values directly here
     section_agg = (
-        ws.groupby("Assigned_Section")
+        joined.groupby("Assigned_Section")
         .agg(
             Well_Count=("UWI", "count"),
             Section_Cuml=("Cuml", "sum"),
             Section_EUR=("EUR", "sum"),
-            Avg_EUR=("EUR", "mean"),
             Avg_IP90=("IP90", "mean"),
             Avg_1YCuml=("1YCuml", "mean"),
             Avg_Wcut=("Wcut", "mean"),
@@ -217,12 +208,25 @@ def compute_section_metrics(_proximal_wells, _grid_df):
         .rename(columns={"Assigned_Section": "Section"})
     )
 
+    # --- 4. Merge & Calculate Recovery Factors ---
+    # We merge the sums BACK into the original grid 'g' 
     g = g.merge(section_agg, on="Section", how="left")
+    
+    # Avoid division by zero/NaN for OOIP
     ooip_safe = g["OOIP"].replace(0, np.nan)
+
+    # NEW SIMPLIFIED MATH: Sum / OOIP
     g["RFTD"] = g["Section_Cuml"] / ooip_safe
     g["URF"] = g["Section_EUR"] / ooip_safe
-    for col in ["RFTD", "URF"]:
-        g[col] = g[col].replace([np.inf, -np.inf], np.nan)
+
+    # --- 5. Map Protection ---
+    # Fill NaNs with 0 so the map renderer has a numeric value to display
+    g["RFTD"] = g["RFTD"].fillna(0)
+    g["URF"] = g["URF"].fillna(0)
+    
+    # Ensure any other missing numeric columns are 0 to prevent map errors
+    cols_to_fix = ["Section_Cuml", "Section_EUR", "Well_Count"]
+    g[cols_to_fix] = g[cols_to_fix].fillna(0)
 
     return g
 
