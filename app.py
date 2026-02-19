@@ -869,16 +869,17 @@ with col_map:
 
     buffer_fg.add_to(m)
 
-    # Layer 4: Existing wells
+        # Layer 4: Existing wells
     well_fg = folium.FeatureGroup(name="Existing Wells")
     line_wells = existing_display[existing_display.geometry.type != "Point"]
     point_wells = existing_display[existing_display.geometry.type == "Point"]
 
     if not line_wells.empty:
-        wl_fields = ["UWI"]
+        wl_fields = ["UWI"]  # Always include UWI
         wl_aliases = ["UWI:"]
-        for wf in ["EUR", "Cuml", "IP90", "1YCuml", "Wcut", "Section"]:
-            if wf in line_wells.columns:
+        # Iterate over all possible columns, but conditionally add them if they exist
+        for wf in ["EUR", "IP90", "1YCuml", "Wcut", "Section", "Cuml"]:
+            if wf in line_wells.columns and line_wells[wf].notna().any(): # Check if col and data exist
                 wl_fields.append(wf)
                 wl_aliases.append(f"{wf}:")
         folium.GeoJson(
@@ -894,10 +895,13 @@ with col_map:
 
     for _, row in point_wells.iterrows():
         tip_parts = [f"<b>UWI:</b> {row.get('UWI', '—')}"]
-        for col, label, fmt_str in [("EUR", "EUR", ",.0f"), ("Cuml", "Cuml", ",.0f"), ("IP90", "IP90", ",.0f"),
-                                ("1YCuml", "1Y Cuml", ",.0f"), ("Wcut", "Wcut", ".0f")]:
-            if col in row.index and pd.notna(row[col]):
-                tip_parts.append(f"<b>{label}:</b> {row[col]:{fmt_str}}")
+        # Use a list to construct and append tooltip parts,  ensuring we only
+        # include columns if they present in the `row`  and have valid data.
+        for col, label, fmt_str in [("EUR", "EUR", ",.0f"), ("IP90", "IP90", ",.0f"),
+                                    ("1YCuml", "1Y Cuml", ",.0f"), ("Wcut", "Wcut", ".1f"), ("Cuml", "Cuml", ",.0f")]:
+            if col in row.index and pd.notna(row[col]):  # Check both column presence and valid data
+                tip_parts.append(f"<b>{label}:</b> {row[col]:{fmt_str}}") # Use row[col] here
+
         folium.CircleMarker(
             location=[row.geometry.y, row.geometry.x],
             radius=1, color="black", fill=True, fill_color="black",
