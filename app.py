@@ -17,7 +17,7 @@ import matplotlib.cm as mpl_cm
 # ==========================================================
 st.set_page_config(
     layout="wide",
-    page_title="Bakken Prospect Analysis",
+    page_title="Bakken Inventory Engine",
     page_icon="🛢️",
 )
 
@@ -599,8 +599,7 @@ p_lines_display = p_lines.to_crs(4326)
 # ================================================================
 # EXECUTIVE SUMMARY
 # ================================================================
-st.title("🛢️ Bakken Prospect Analyzer")
-st.caption("Identifying the best locations to drill next based on proximal well performance and reservoir quality.")
+st.title("🛢️ Bakken Inventory Engine")
 
 if n_passing > 0:
     best_pool = p[p["_passes_filter"]].dropna(subset=[metric_col])
