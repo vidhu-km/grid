@@ -159,10 +159,9 @@ proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 @st.cache_data(show_spinner="Computing section metrics …")
 def compute_section_metrics(_proximal_wells, _grid_df):
     aw = _proximal_wells.copy()
-    # Keep the full grid to ensure geometry and OOIP are preserved for the map
-    g = _grid_df.copy()
+    g = _grid_df.copy() # Use the full grid to preserve geometry/OOIP
 
-    # --- 1. Endpoint Logic (Kept exactly as is) ---
+    # --- 1. Endpoint Logic (Unchanged) ---
     endpoints = []
     for idx, row in aw.iterrows():
         geom = row.geometry
@@ -187,19 +186,18 @@ def compute_section_metrics(_proximal_wells, _grid_df):
 
     # --- 2. Spatial Join ---
     joined = gpd.sjoin(endpoint_gdf, g[["Section", "geometry"]], how="left", predicate="within")
-
-    # Fix potential column name shifts from the join
+    
     sec_col = "Section_right" if "Section_right" in joined.columns else "Section"
     joined = joined.rename(columns={sec_col: "Assigned_Section"})
 
-    # --- 3. Simplified Math Aggregation ---
-    # We sum the values directly here
+    # --- 3. Simplified Aggregation (The Math Fix) ---
     section_agg = (
         joined.groupby("Assigned_Section")
         .agg(
             Well_Count=("UWI", "count"),
-            Section_Cuml=("Cuml", "sum"),
-            Section_EUR=("EUR", "sum"),
+            Section_Cuml=("Cuml", "sum"), # Direct Sum
+            Section_EUR=("EUR", "sum"),   # Direct Sum
+            Avg_EUR=("EUR", "mean"),
             Avg_IP90=("IP90", "mean"),
             Avg_1YCuml=("1YCuml", "mean"),
             Avg_Wcut=("Wcut", "mean"),
@@ -209,24 +207,17 @@ def compute_section_metrics(_proximal_wells, _grid_df):
     )
 
     # --- 4. Merge & Calculate Recovery Factors ---
-    # We merge the sums BACK into the original grid 'g' 
     g = g.merge(section_agg, on="Section", how="left")
     
-    # Avoid division by zero/NaN for OOIP
     ooip_safe = g["OOIP"].replace(0, np.nan)
 
-    # NEW SIMPLIFIED MATH: Sum / OOIP
+    # Simplified math as requested: Sum / OOIP
     g["RFTD"] = g["Section_Cuml"] / ooip_safe
     g["URF"] = g["Section_EUR"] / ooip_safe
 
-    # --- 5. Map Protection ---
-    # Fill NaNs with 0 so the map renderer has a numeric value to display
-    g["RFTD"] = g["RFTD"].fillna(0)
-    g["URF"] = g["URF"].fillna(0)
-    
-    # Ensure any other missing numeric columns are 0 to prevent map errors
-    cols_to_fix = ["Section_Cuml", "Section_EUR", "Well_Count"]
-    g[cols_to_fix] = g[cols_to_fix].fillna(0)
+    # Final cleanup to ensure the map renderer doesn't crash on NaNs/Infs
+    for col in ["RFTD", "URF", "Section_Cuml", "Section_EUR"]:
+        g[col] = g[col].replace([np.inf, -np.inf], np.nan).fillna(0)
 
     return g
 
