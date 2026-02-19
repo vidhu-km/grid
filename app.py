@@ -84,13 +84,6 @@ def get_ylgn_hex(value, vmin, vmax):
 
 
 # ==========================================================
-# Session state for map zoom target
-# ==========================================================
-if "zoom_to_label" not in st.session_state:
-    st.session_state["zoom_to_label"] = None
-
-
-# ==========================================================
 # Data loading (cached)
 # ==========================================================
 
@@ -303,9 +296,6 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
             record["Proximal_Count"] = 0
             record["_proximal_uwis"] = ""
             record["_section_label"] = "Unknown"
-            record["EUR_median"] = np.nan
-            record["EUR_p10"] = np.nan
-            record["EUR_p90"] = np.nan
             results.append(record)
             continue
 
@@ -323,7 +313,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         else:
             record["_section_label"] = "Unknown"
 
-        buffer_geom = geom.buffer(_buffer_m, cap_style=2)
+        buffer_geom = geom.buffer(_buffer_m, cap_style=2, join_style='mitre')
 
         midpoint_mask = prox["_midpoint"].apply(
             lambda mp: buffer_geom.contains(mp) if mp is not None else False
@@ -360,16 +350,9 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
             else:
                 for col in WELL_LEVEL_METRICS:
                     record[col] = hits[col].mean()
-
-            record["EUR_median"] = hits["EUR"].median()
-            record["EUR_p10"] = hits["EUR"].quantile(0.9)
-            record["EUR_p90"] = hits["EUR"].quantile(0.1)
         else:
             for col in WELL_LEVEL_METRICS:
                 record[col] = np.nan
-            record["EUR_median"] = np.nan
-            record["EUR_p10"] = np.nan
-            record["EUR_p90"] = np.nan
 
         buffer_series = gpd.GeoSeries([buffer_geom], crs=pros.crs)
         buffer_clip_gdf = gpd.GeoDataFrame(geometry=buffer_series)
@@ -533,115 +516,9 @@ else:
 metric_col = "HighGradeScore" if selected_metric == "High-Grade Score" else selected_metric
 ascending = selected_metric in ["Wcut", "URF", "RFTD"]
 
-# ---- Rank stability ----
-@st.cache_data(show_spinner="Computing rank stability …")
-def compute_rank_stability(_p_df, _proximal_wells, _buffer_m, _metric_col, _ascending):
-    p_local = _p_df.copy()
-    passing = p_local[p_local["_passes_filter"]].copy()
-    if passing.empty or _metric_col not in passing.columns:
-        return pd.Series(dtype=float)
-
-    baseline = passing.dropna(subset=[_metric_col]).sort_values(
-        _metric_col, ascending=_ascending
-    ).reset_index()
-    baseline["_base_rank"] = range(1, len(baseline) + 1)
-    base_map = dict(zip(baseline["index"], baseline["_base_rank"]))
-
-    prox = _proximal_wells.copy()
-    prox_mid_x = prox["_midpoint"].apply(lambda mp: mp.x if mp is not None else np.nan)
-    prox_mid_y = prox["_midpoint"].apply(lambda mp: mp.y if mp is not None else np.nan)
-    stability = {}
-
-    for pidx in passing.index:
-        geom = p_local.loc[pidx, "geometry"]
-        prospect_mid = midpoint_of_geom(geom)
-        uwi_str = p_local.loc[pidx].get("_proximal_uwis", "")
-        if not uwi_str or pd.isna(uwi_str):
-            stability[pidx] = 0
-            continue
-
-        uwi_list = [u.strip() for u in str(uwi_str).split(",") if u.strip()]
-        if len(uwi_list) <= 1:
-            stability[pidx] = np.nan
-            continue
-
-        prox_sub = prox[prox["UWI"].isin(uwi_list)]
-        if prox_sub.empty or prospect_mid is None:
-            stability[pidx] = 0
-            continue
-
-        if _metric_col in WELL_LEVEL_METRICS:
-            if _ascending:
-                best_idx = prox_sub[_metric_col].idxmin()
-            else:
-                best_idx = prox_sub[_metric_col].idxmax()
-            if pd.isna(best_idx):
-                stability[pidx] = 0
-                continue
-            best_uwi = prox_sub.loc[best_idx, "UWI"]
-        else:
-            pmx = prospect_mid.x
-            pmy = prospect_mid.y
-            dists = np.sqrt(
-                (prox_mid_x.loc[prox_sub.index] - pmx) ** 2
-                + (prox_mid_y.loc[prox_sub.index] - pmy) ** 2
-            )
-            best_uwi = prox_sub.loc[dists.idxmin(), "UWI"]
-
-        remaining = prox_sub[prox_sub["UWI"] != best_uwi]
-        if remaining.empty:
-            stability[pidx] = np.nan
-            continue
-
-        pmx = prospect_mid.x
-        pmy = prospect_mid.y
-        hit_dists = np.sqrt(
-            (prox_mid_x.loc[remaining.index] - pmx) ** 2
-            + (prox_mid_y.loc[remaining.index] - pmy) ** 2
-        ).replace(0, 1.0)
-        weights = (1.0 / (hit_dists ** 2)).replace([np.inf, -np.inf], np.nan).dropna()
-
-        new_val = np.nan
-        if _metric_col in WELL_LEVEL_METRICS and weights.sum() > 0:
-            col_vals = remaining.loc[weights.index, _metric_col]
-            mask = col_vals.notna()
-            if mask.sum() > 0:
-                w = weights[mask]
-                new_val = (col_vals[mask] * w).sum() / w.sum()
-
-        if pd.isna(new_val):
-            stability[pidx] = 0
-            continue
-
-        comparison = passing[[_metric_col]].copy()
-        comparison.loc[pidx, _metric_col] = new_val
-        comparison = comparison.dropna(subset=[_metric_col])
-        new_ranks = comparison.sort_values(_metric_col, ascending=_ascending).reset_index()
-        new_ranks["_new_rank"] = range(1, len(new_ranks) + 1)
-        new_map = dict(zip(new_ranks["index"], new_ranks["_new_rank"]))
-
-        old_r = base_map.get(pidx, np.nan)
-        new_r = new_map.get(pidx, np.nan)
-        if pd.notna(old_r) and pd.notna(new_r):
-            stability[pidx] = int(new_r - old_r)
-        else:
-            stability[pidx] = 0
-
-    return pd.Series(stability)
-
-if n_passing > 0 and metric_col in p.columns:
-    rank_stability = compute_rank_stability(p, proximal_wells, buffer_distance, metric_col, ascending)
-    p["RankStability"] = rank_stability
-else:
-    p["RankStability"] = np.nan
-
 # ---- Compute colour map values for buffers (using same logic as table) ----
 passing_metric_vals = p[p["_passes_filter"]][metric_col].dropna()
 if not passing_metric_vals.empty:
-    # For the table, gmap_vals = metric_col values if not ascending, else negated
-    # The YlGn colormap maps low→yellow, high→green
-    # So for "higher is better" metrics, raw values work (high value = green)
-    # For "lower is better" (ascending), we negate so lower original = higher negated = green
     if ascending:
         gmap_vmin = float(-passing_metric_vals.max())
         gmap_vmax = float(-passing_metric_vals.min())
@@ -663,7 +540,6 @@ for idx_val in p[p["_passes_filter"]].index:
     else:
         label_color_map[label] = "#cccccc"
 
-# Also store the metric value per label for buffer colouring
 p["_buffer_color"] = p["Label"].map(label_color_map).fillna("#cccccc")
 
 # ---- Prepare display data ----
@@ -676,7 +552,7 @@ existing_display_cols = ["UWI", "geometry"] + [
 ]
 existing_display = proximal_wells[existing_display_cols].copy().to_crs(4326)
 
-# Build a lookup: Label → midpoint in EPSG:4326 for zoom
+# Build a lookup: Label → midpoint in EPSG:4326
 transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 label_to_latlon = {}
 for idx_val, row in p.iterrows():
@@ -702,7 +578,7 @@ for idx, row in p.iterrows():
         "RFTD": row.get("RFTD", np.nan),
         "URF": row.get("URF", np.nan),
         metric_col: row.get(metric_col, np.nan),
-        "geometry": row.geometry.buffer(buffer_distance, cap_style=2),
+        "geometry": row.geometry.buffer(buffer_distance),
     })
 buffer_gdf = gpd.GeoDataFrame(buffer_records, crs=p.crs).to_crs(4326)
 
@@ -747,11 +623,9 @@ else:
     st.warning("No prospects pass the current filters. Try relaxing your criteria.")
 
 # ==============================================================
-# We render the RANKING TABLE FIRST so that clicking a row can
-# set the zoom target BEFORE we draw the map.
+# Prepare ranking dataframe
 # ==============================================================
 
-# Prepare ranking dataframe once (used by both table and map)
 rank_df = None
 if selected_metric == "High-Grade Score" and total_weight != 100:
     pass  # will show warning later
@@ -762,8 +636,6 @@ else:
         "Label", "_prospect_type", "Proximal_Count",
         "EUR", "IP90", "1YCuml", "Wcut",
         "OOIP", "RFTD", "URF",
-        "EUR_median", "EUR_p10", "EUR_p90",
-        "RankStability",
     ]
     if selected_metric == "High-Grade Score":
         display_cols.append("HighGradeScore")
@@ -785,10 +657,6 @@ else:
         rename_map = {
             "_prospect_type": "Type",
             "Proximal_Count": "Proximal",
-            "EUR_median": "EUR Med",
-            "EUR_p10": "EUR P10",
-            "EUR_p90": "EUR P90",
-            "RankStability": "Rank Δ",
         }
         rank_df = rank_df_raw.rename(columns=rename_map)
 
@@ -796,7 +664,7 @@ else:
 col_map, col_rank = st.columns([7, 4])
 
 # ----------------------------------------------------------
-# RIGHT COLUMN — Ranking & Detail (rendered first to capture zoom target)
+# RIGHT COLUMN — Ranking & Detail
 # ----------------------------------------------------------
 with col_rank:
     st.header("📊 Prospect Ranking")
@@ -809,24 +677,11 @@ with col_rank:
         st.caption(f"Ranked by **{selected_metric}** · {len(rank_df)} prospects · "
                    f"Buffer: {buffer_distance}m · IDW²")
 
-        summary_cols = st.columns(3)
-        is_score = "Score" in selected_metric
-        with summary_cols[0]:
-            v = rank_df[metric_col].iloc[0]
-            st.metric("Best", f"{v:,.2f}" if is_score else f"{v:,.0f}")
-        with summary_cols[1]:
-            med = rank_df[metric_col].median()
-            st.metric("Median", f"{med:,.2f}" if is_score else f"{med:,.0f}")
-        with summary_cols[2]:
-            v = rank_df[metric_col].iloc[-1]
-            st.metric("Worst", f"{v:,.2f}" if is_score else f"{v:,.0f}")
-
         fmt = {
             "EUR": "{:,.0f}", "IP90": "{:,.0f}", "1YCuml": "{:,.0f}",
             "Wcut": "{:.1f}", "OOIP": "{:,.0f}",
             "RFTD": "{:.3f}", "URF": "{:.3f}", "Percentile": "{:.0f}%",
-            "EUR Med": "{:,.0f}", "EUR P10": "{:,.0f}", "EUR P90": "{:,.0f}",
-            "Proximal": "{:.0f}", "Rank Δ": "{:+.0f}",
+            "Proximal": "{:.0f}",
         }
         if "HighGradeScore" in rank_df.columns:
             fmt["HighGradeScore"] = "{:.3f}"
@@ -841,25 +696,6 @@ with col_rank:
 
         st.dataframe(styled, use_container_width=True, height=500)
 
-        # ----------------------------------------------------------
-        # Clickable table: use selectbox to pick a prospect → zoom
-        # ----------------------------------------------------------
-        st.markdown("##### 🔎 Click to Zoom on Map")
-        label_list = rank_df["Label"].tolist()
-
-        # Determine default index from session state
-        default_idx = 0
-        if st.session_state.get("zoom_to_label") in label_list:
-            default_idx = label_list.index(st.session_state["zoom_to_label"])
-
-        selected_label = st.selectbox(
-            "Select a prospect to zoom to on map",
-            label_list,
-            index=default_idx,
-            key="zoom_select",
-        )
-        st.session_state["zoom_to_label"] = selected_label
-
         csv = rank_df.to_csv().encode("utf-8")
         st.download_button("⬇️ Download Rankings (CSV)", data=csv,
                            file_name="bakken_prospect_rankings.csv", mime="text/csv")
@@ -870,8 +706,13 @@ with col_rank:
         st.markdown("---")
         st.subheader("🔬 Prospect Detail")
 
-        # Use the same selected label for detail
-        detail_label = selected_label
+        label_list = rank_df["Label"].tolist()
+        detail_label = st.selectbox(
+            "Select a prospect",
+            label_list,
+            index=0,
+            key="detail_select",
+        )
 
         if detail_label and detail_label in rank_df["Label"].values:
             dr = rank_df[rank_df["Label"] == detail_label].iloc[0]
@@ -887,52 +728,6 @@ with col_rank:
             dc6.metric("URF", f"{dr['URF']:.3f}" if pd.notna(dr.get("URF")) else "—")
             dc7.metric("RFTD", f"{dr['RFTD']:.3f}" if pd.notna(dr.get("RFTD")) else "—")
             dc8.metric("Proximal", f"{dr['Proximal']:.0f}" if pd.notna(dr.get("Proximal")) else "—")
-
-            if pd.notna(dr.get("Rank Δ")):
-                delta_val = int(dr["Rank Δ"])
-                st.metric("Rank Stability",
-                          f"{delta_val:+d} ranks" if delta_val != 0 else "Stable")
-
-            if pd.notna(dr.get("EUR P10")) and pd.notna(dr.get("EUR P90")):
-                st.caption(
-                    f"EUR range: P90 = {dr['EUR P90']:,.0f} · "
-                    f"Median = {dr.get('EUR Med', 0):,.0f} · "
-                    f"P10 = {dr['EUR P10']:,.0f}"
-                )
-
-            # ---- Spider Chart ----
-            st.markdown("##### Prospect Profile (Radar)")
-            radar_cats = ["EUR", "IP90", "1YCuml", "Wcut", "OOIP", "URF", "RFTD"]
-            invert_set = {"Wcut", "URF", "RFTD"}
-
-            radar_vals = []
-            for c in radar_cats:
-                col_data = rank_df[c].dropna()
-                if col_data.empty or pd.isna(dr.get(c)):
-                    radar_vals.append(50)
-                    continue
-                pct = (col_data < dr[c]).sum() / len(col_data) * 100
-                if c in invert_set:
-                    pct = 100 - pct
-                radar_vals.append(pct)
-
-            radar_vals.append(radar_vals[0])
-            radar_labels = radar_cats + [radar_cats[0]]
-
-            fig_radar = go.Figure(data=go.Scatterpolar(
-                r=radar_vals, theta=radar_labels,
-                fill="toself",
-                fillcolor="rgba(33,150,243,0.25)",
-                line_color="#2196F3",
-                name=detail_label,
-            ))
-            fig_radar.update_layout(
-                polar=dict(radialaxis=dict(visible=True, range=[0, 100])),
-                showlegend=False,
-                margin=dict(l=40, r=40, t=30, b=30),
-                height=320,
-            )
-            st.plotly_chart(fig_radar, use_container_width=True)
 
     # ---- No-proximal prospects ----
     no_proximal_prospects = p[p["_no_proximal"]].copy()
@@ -951,21 +746,16 @@ with col_rank:
         )
 
 # ----------------------------------------------------------
-# LEFT COLUMN — Map (rendered after table so zoom target is set)
+# LEFT COLUMN — Map
 # ----------------------------------------------------------
 with col_map:
-    # Determine map centre and zoom
-    zoom_label = st.session_state.get("zoom_to_label")
-    if zoom_label and zoom_label in label_to_latlon:
-        centre_lat, centre_lon = label_to_latlon[zoom_label]
-        zoom_level = 14  # zoomed in on the selected prospect
-    else:
-        bounds = p.total_bounds
-        centre_x = (bounds[0] + bounds[2]) / 2
-        centre_y = (bounds[1] + bounds[3]) / 2
-        transformer = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
-        centre_lon, centre_lat = transformer.transform(centre_x, centre_y)
-        zoom_level = 11
+    # Default map centre
+    bounds = p.total_bounds
+    centre_x = (bounds[0] + bounds[2]) / 2
+    centre_y = (bounds[1] + bounds[3]) / 2
+    transformer = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
+    centre_lon, centre_lat = transformer.transform(centre_x, centre_y)
+    zoom_level = 11
 
     m = folium.Map(location=[centre_lat, centre_lon], zoom_start=zoom_level, tiles="CartoDB positron")
     MiniMap(toggle_display=True, position="bottomleft").add_to(m)
@@ -978,7 +768,7 @@ with col_map:
             "fillColor": "#fff9c4",
             "color": "#fff9c4",
             "weight": 0.5,
-            "fillOpacity": 0.5,
+            "fillOpacity": 0.2,
         },
     ).add_to(land_fg)
     land_fg.add_to(m)
@@ -1046,12 +836,6 @@ with col_map:
     for bidx, brow in passing_buf.iterrows():
         fill_color = label_color_map.get(brow["Label"], "#cccccc")
 
-        # Highlight the selected/zoomed prospect with a thicker border
-        is_selected = (brow["Label"] == zoom_label)
-        border_weight = 3 if is_selected else 1
-        border_color = "#ff0000" if is_selected else fill_color
-        fill_opacity = 0.55 if is_selected else 0.4
-
         tip_parts = [
             f"<b>{brow['Label']}</b>",
             f"Proximal Wells: {brow.get('Proximal_Count', '—')}",
@@ -1072,11 +856,11 @@ with col_map:
 
         folium.GeoJson(
             brow.geometry.__geo_interface__,
-            style_function=lambda _, fc=fill_color, bw=border_weight, bc=border_color, fo=fill_opacity: {
+            style_function=lambda _, fc=fill_color: {
                 "fillColor": fc,
-                "fillOpacity": fo,
-                "color": bc,
-                "weight": bw,
+                "fillOpacity": 0.4,
+                "color": fc,
+                "weight": 1,
                 "opacity": 0.7,
             },
             tooltip=folium.Tooltip(tip_text, sticky=True,
@@ -1177,22 +961,6 @@ with col_map:
         ),
     ).add_to(prospect_fg)
     prospect_fg.add_to(m)
-
-    # Add a marker for the selected/zoomed prospect
-    if zoom_label and zoom_label in label_to_latlon:
-        sel_lat, sel_lon = label_to_latlon[zoom_label]
-        sel_color = label_color_map.get(zoom_label, "#2196F3")
-        folium.Marker(
-            location=[sel_lat, sel_lon],
-            icon=folium.DivIcon(
-                html=f'<div style="font-size:11px;font-weight:bold;color:#222;'
-                     f'background:{sel_color};border:2px solid #333;border-radius:4px;'
-                     f'padding:2px 6px;white-space:nowrap;transform:translate(-50%,-100%);">'
-                     f'📍 {zoom_label}</div>',
-                icon_size=(0, 0),
-                icon_anchor=(0, 0),
-            ),
-        ).add_to(m)
 
     folium.LayerControl(collapsed=True).add_to(m)
     st_folium(m, use_container_width=True, height=900, returned_objects=[])
