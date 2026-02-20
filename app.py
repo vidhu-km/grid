@@ -866,28 +866,28 @@ with col_map:
     if not line_wells.empty:
 
     # 1️⃣ Invisible thick layer (for easier hover detection)
-    folium.GeoJson(
-        line_wells.to_json(),
-        style_function=lambda _: {
-            "color": "transparent",
-            "weight": 10,        # 👈 bigger hit area
-            "opacity": 0
-        },
-        highlight_function=lambda _: {
-            "weight": 10,
-            "color": "#555",
-            "opacity": 0.3
-        },
-        tooltip=folium.GeoJsonTooltip(
-            fields=well_tooltip_fields,
-            aliases=[f"{f}:" for f in well_tooltip_fields],
-            localize=True,
-            sticky=True,
-            style="font-size:11px;padding:3px 6px;"
-                  "background:rgba(255,255,255,0.92);"
-                  "border:1px solid #333;border-radius:3px;",
-        ),
-    ).add_to(well_fg)
+        folium.GeoJson(
+            line_wells.to_json(),
+            style_function=lambda _: {
+                "color": "transparent",
+                "weight": 12,        # 👈 bigger hit area
+                "opacity": 0
+            },
+            highlight_function=lambda _: {
+                "weight": 12,
+                "color": "#555",
+                "opacity": 0.3
+            },
+            tooltip=folium.GeoJsonTooltip(
+                fields=well_tooltip_fields,
+                aliases=[f"{f}:" for f in well_tooltip_fields],
+                localize=True,
+                sticky=True,
+                style="font-size:11px;padding:3px 6px;"
+                    "background:rgba(255,255,255,0.92);"
+                    "border:1px solid #333;border-radius:3px;",
+            ),
+        ).add_to(well_fg)
 
     # 2️⃣ Visible thin line on top
     folium.GeoJson(
