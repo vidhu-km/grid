@@ -205,8 +205,12 @@ prospects = pd.concat(prospect_frames, ignore_index=True)
 prospects = gpd.GeoDataFrame(prospects, geometry="geometry", crs=infills_gdf.crs)
 
 # ==========================================================
-# Prospect analysis — IDW² (fully dynamic)
+# Prospect analysis — IDW² (with fixed caching)
 # ==========================================================
+
+def hash_with_buffer(val, buffer_m):
+    """Custom hash function incorporating buffer distance"""
+    return hash((buffer_m, id(val)))
 
 @st.cache_data(
     show_spinner="Analysing prospects (IDW²) …",
@@ -216,6 +220,8 @@ prospects = gpd.GeoDataFrame(prospects, geometry="geometry", crs=infills_gdf.crs
     }
 )
 def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffer_m, _well_metrics, _sec_metrics):
+    # [Keep the original function body unchanged]
+    ...
     # [Existing function body remains unchanged]
     pros = _prospects.copy()
     prox = _proximal_wells.copy()
