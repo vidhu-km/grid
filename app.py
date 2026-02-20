@@ -867,7 +867,7 @@ with col_map:
         folium.GeoJson(
             line_wells.to_json(),
             style_function=lambda _: {"color": "black", "weight": 1, "opacity": 0.7},
-            highlight_function=lambda _: {"weight": 2.5, "color": "#555"},
+            highlight_function=lambda _: {"weight": 3.5, "color": "#555"},
             tooltip=folium.GeoJsonTooltip(
                 fields=well_tooltip_fields,
                 aliases=[f"{f}:" for f in well_tooltip_fields],
