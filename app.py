@@ -215,14 +215,18 @@ def hash_with_buffer(val, buffer_m):
 @st.cache_data(
     show_spinner="Analysing prospects (IDW²) …",
     hash_funcs={
-        gpd.GeoDataFrame: lambda gdf: hash_with_buffer(gdf, buffer_distance),
-        list: lambda lst: hash(tuple(lst)),
+        gpd.GeoDataFrame: lambda gdf: hash(gdf.to_wkb().sum()),  # stable content hash
     }
 )
-def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffer_m, _well_metrics, _sec_metrics):
-    # [Keep the original function body unchanged]
-    ...
-    # [Existing function body remains unchanged]
+def analyze_prospects_idw(
+    _prospects,        # underscore = don't hash (large GeoDataFrame)
+    _proximal_wells,   # underscore = don't hash (large GeoDataFrame)
+    _section_enriched, # underscore = don't hash (large GeoDataFrame)
+    buffer_m,          # ✅ NO underscore — Streamlit WILL hash this
+    well_metrics,      # ✅ NO underscore
+    sec_metrics,       # ✅ NO underscore
+):
+    """IDW² analysis. Cache busts when buffer_m, well_metrics, or sec_metrics change."""
     pros = _prospects.copy()
     prox = _proximal_wells.copy()
     sections = _section_enriched.copy()
@@ -234,7 +238,7 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
 
         prospect_mid = midpoint_of_geom(geom)
         if prospect_mid is None:
-            for col in _well_metrics + _sec_metrics:
+            for col in well_metrics + sec_metrics:
                 record[col] = np.nan
             record["Proximal_Count"] = 0
             record["_proximal_uwis"] = ""
@@ -259,8 +263,8 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         else:
             record["_section_label"] = "Unknown"
 
-        # Buffer & proximal wells
-        buffer_geom = geom.buffer(_buffer_m, cap_style=2)
+        # Buffer & proximal wells — uses buffer_m (not _buffer_m)
+        buffer_geom = geom.buffer(buffer_m, cap_style=2)
         midpoint_mask = prox["_midpoint"].apply(
             lambda mp: buffer_geom.contains(mp) if mp is not None else False,
         )
@@ -273,14 +277,14 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
         if len(hits) > 0:
             pmx, pmy = prospect_mid.x, prospect_mid.y
             hit_dists = np.sqrt(
-                (hits["_midpoint"].apply(lambda m: m.x) - pmx) ** 2
-                + (hits["_midpoint"].apply(lambda m: m.y) - pmy) ** 2,
+                (hits["_midpoint"].apply(lambda m_pt: m_pt.x) - pmx) ** 2
+                + (hits["_midpoint"].apply(lambda m_pt: m_pt.y) - pmy) ** 2,
             ).replace(0, 1.0)
             weights = (1.0 / (hit_dists ** 2)).replace([np.inf, -np.inf], np.nan)
             valid_w = weights.dropna()
 
             if valid_w.sum() > 0:
-                for col in _well_metrics:
+                for col in well_metrics:
                     if col not in hits.columns:
                         record[col] = np.nan
                         continue
@@ -292,30 +296,30 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
                     else:
                         record[col] = np.nan
             else:
-                for col in _well_metrics:
+                for col in well_metrics:
                     record[col] = hits[col].mean() if col in hits.columns else np.nan
         else:
-            for col in _well_metrics:
+            for col in well_metrics:
                 record[col] = np.nan
 
         # Section-level metrics via spatial overlap
         buffer_series = gpd.GeoSeries([buffer_geom], crs=pros.crs)
         buffer_clip_gdf = gpd.GeoDataFrame(geometry=buffer_series)
         sec_cols_for_overlay = ["Section", "geometry"] + [
-            c for c in _sec_metrics if c in sections.columns
+            c for c in sec_metrics if c in sections.columns
         ]
         overlaps = gpd.overlay(
             sections[sec_cols_for_overlay], buffer_clip_gdf, how="intersection",
         )
         if not overlaps.empty:
-            for col in _sec_metrics:
+            for col in sec_metrics:
                 if col in overlaps.columns:
                     valid = overlaps[col].dropna()
                     record[col] = valid.mean() if not valid.empty else np.nan
                 else:
                     record[col] = np.nan
         else:
-            for col in _sec_metrics:
+            for col in sec_metrics:
                 record[col] = np.nan
 
         results.append(record)
@@ -336,8 +340,10 @@ def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffe
 
 
 prospect_metrics = analyze_prospects_idw(
-    prospects, proximal_wells, section_enriched, buffer_distance,
-    WELL_NUMERIC_COLS, SEC_NUMERIC_COLS,
+    prospects, proximal_wells, section_enriched,
+    buffer_distance,        # ✅ no underscore in param name → included in cache key
+    WELL_NUMERIC_COLS,      # ✅ no underscore
+    SEC_NUMERIC_COLS,       # ✅ no underscore
 )
 
 prospects = prospects.join(
