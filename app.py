@@ -870,11 +870,11 @@ with col_map:
             line_wells.to_json(),
             style_function=lambda _: {
                 "color": "transparent",
-                "weight": 12,        # 👈 bigger hit area
+                "weight": 15,        # 👈 bigger hit area
                 "opacity": 0
             },
             highlight_function=lambda _: {
-                "weight": 12,
+                "weight": 15,
                 "color": "#555",
                 "opacity": 0.3
             },
@@ -894,7 +894,7 @@ with col_map:
         line_wells.to_json(),
         style_function=lambda _: {
             "color": "black",
-            "weight": 1.5,
+            "weight": 0.5,
             "opacity": 0.8
         }
     ).add_to(well_fg)
