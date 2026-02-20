@@ -208,11 +208,15 @@ prospects = gpd.GeoDataFrame(prospects, geometry="geometry", crs=infills_gdf.crs
 # Prospect analysis — IDW² (fully dynamic)
 # ==========================================================
 
-@st.cache_data(show_spinner="Analysing prospects (IDW²) …")
-def analyze_prospects_idw(
-    _prospects, _proximal_wells, _section_enriched,
-    _buffer_m, _well_metrics, _sec_metrics,
-):
+@st.cache_data(
+    show_spinner="Analysing prospects (IDW²) …",
+    hash_funcs={
+        gpd.GeoDataFrame: lambda gdf: hash_with_buffer(gdf, buffer_distance),
+        list: lambda lst: hash(tuple(lst)),
+    }
+)
+def analyze_prospects_idw(_prospects, _proximal_wells, _section_enriched, _buffer_m, _well_metrics, _sec_metrics):
+    # [Existing function body remains unchanged]
     pros = _prospects.copy()
     prox = _proximal_wells.copy()
     sections = _section_enriched.copy()
