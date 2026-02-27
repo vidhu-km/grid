@@ -93,7 +93,7 @@ def load_data():
     land = gpd.read_file("Bakken Land.shp")
 
     # --- Excel: Sheet 1 = well-level, Sheet 2 = section-level ---
-    well_df = pd.read_excel("wells.xlsx", sheet_name=0, usecols="A, C:K, O, Q, S")
+    well_df = pd.read_excel("wells.xlsx", sheet_name=0, usecols="A, C:K, O, Q, T")
     section_df = pd.read_excel("wells.xlsx", sheet_name=1)
 
     all_gdfs = [lines, points, grid, units, infills, lease_lines, merged, land]
