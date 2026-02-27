@@ -335,9 +335,18 @@ def analyze_prospects_idw(
         for i, row_idx in enumerate(indices, 1):
             results_df.loc[row_idx, "_section_label"] = f"{label}-{i}"
 
+    # ======================================================
+    # Apply Prospect Multiplier
+    # ======================================================
+    MULTIPLIER = 1.5
+
+    metric_cols = well_metrics + sec_metrics
+    for col in metric_cols:
+        if col in results_df.columns:
+            results_df[col] = results_df[col] * MULTIPLIER
+
     results_df = results_df.set_index("_idx")
     return results_df
-
 
 prospect_metrics = analyze_prospects_idw(
     prospects, proximal_wells, section_enriched,
