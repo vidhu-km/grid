@@ -30,7 +30,7 @@ NULL_STYLE = {
     "weight": 0.25,
 }
 
-DEFAULT_BUFFER_M = 500
+DEFAULT_BUFFER_M = 800
 
 # ==========================================================
 # Helper utilities
