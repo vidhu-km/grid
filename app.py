@@ -1057,16 +1057,3 @@ if enable_classification and classification_ready and "Classification" in p.colu
         )
     else:
         st.warning("No prospects with complete data for classification charts.")
-```
-
-**What changed and why:**
-
-| Feature | How it works |
-|---|---|
-| **Classification** | Checkbox-enabled in sidebar. Fits linear trends (EUR/IP90/1Y vs OOIP) from **field section averages** (well data grouped by section), then scores each prospect's IDW/mean values against those trends using z-scores. Weighted composite z-score classifies as Above/On/Below Trend. |
-| **Fuzzy column matching** | Uses `thefuzz` to suggest which prospect columns map to OOIP, EUR, IP90, 1Y — user confirms/overrides via dropdowns. No hard-coded column names. |
-| **Field section averages** | Wells are spatially joined to sections, then averaged per section to build the field trend baseline. If OOIP lives in Sheet 2 (section-level), it's pulled from there. |
-| **Bottomhole dots** | `endpoint_of_geom()` extracts the last coordinate of every line geometry. A `CircleMarker` is drawn there for existing wells (black, r=2) and prospects (red or classification-coloured, r=3). Point wells already show as dots. |
-| **Prospect line colours** | When classification is on, prospect lines are coloured green/blue/red by classification instead of uniform red. |
-| **Charts** | 4 scatter plots (EUR/IP90/1Y vs OOIP + Composite Z) with field section averages as grey background points and trend threshold lines. Summary table + CSV download below. |
-| **No caching on analysis** | `analyze_prospects` runs fresh every time. Only `load_data()` (file I/O) is cached since source files don't change. |
