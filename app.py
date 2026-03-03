@@ -13,7 +13,6 @@ import matplotlib.cm as mpl_cm
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression
-from thefuzz import process as fuzz_process
 
 # ==========================================================
 # Page configuration
@@ -31,6 +30,10 @@ COLOR_MAP_CLASS = {
     "Below Trend": "#d62728",
 }
 
+# Hard-coded column names
+WELL_COLS = ["Norm EUR", "Norm 1Y Cuml", "Norm IP90"]
+SECTION_OOIP_COL = "SectionOOIP"
+
 # ==========================================================
 # Helpers
 # ==========================================================
@@ -46,7 +49,6 @@ def safe_range(series):
 
 
 def zscore_full(series, full_series):
-    """Z-score `series` using mean/std from `full_series` (entire set)."""
     vals = full_series.replace([np.inf, -np.inf], np.nan)
     mu, sigma = vals.mean(), vals.std()
     if sigma == 0 or pd.isna(sigma):
@@ -87,15 +89,6 @@ def get_ylgn_hex(value, vmin, vmax):
     return mcolors.to_hex(rgba)
 
 
-def fuzzy_find(columns, keywords, threshold=65):
-    candidates = list(columns)
-    for kw in keywords:
-        match, score = fuzz_process.extractOne(kw, candidates) if candidates else (None, 0)
-        if match and score >= threshold:
-            return match
-    return None
-
-
 def fit_trend(x, y):
     mask = np.isfinite(x) & np.isfinite(y)
     if mask.sum() < 2:
@@ -127,9 +120,9 @@ def load_data():
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
 
-    # Sheet 0: UWI, Section, numeric cols...
+    # Sheet 0: must have UWI, Section, Norm EUR, Norm 1Y Cuml, Norm IP90
     well_df = pd.read_excel("wells.xlsx", sheet_name=0)
-    # Sheet 1: Section, numeric cols...
+    # Sheet 1: must have Section, SectionOOIP
     section_df = pd.read_excel("wells.xlsx", sheet_name=1)
 
     for gdf in [lines, points, grid, units, infills, lease_lines, merged, land]:
@@ -140,42 +133,46 @@ def load_data():
     grid["Section"] = grid["Section"].astype(str).str.strip()
     grid["geometry"] = grid.geometry.simplify(50, preserve_topology=True)
 
+    # Clean well data — keep only what we need
     well_df["UWI"] = well_df["UWI"].astype(str).str.strip()
     well_df["Section"] = well_df["Section"].astype(str).str.strip()
-    well_numeric_cols = [
-        c for c in well_df.columns
-        if c not in ("UWI", "Section") and pd.api.types.is_numeric_dtype(well_df[c])
-    ]
-    for col in well_numeric_cols:
+    for col in WELL_COLS:
         well_df[col] = pd.to_numeric(well_df[col], errors="coerce")
 
+    # Clean section data
     section_df["Section"] = section_df["Section"].astype(str).str.strip()
+    section_df[SECTION_OOIP_COL] = pd.to_numeric(section_df[SECTION_OOIP_COL], errors="coerce")
+
+    # Also keep any other numeric columns in section_df for the grid gradient selector
     sec_numeric_cols = [
         c for c in section_df.columns
         if c != "Section" and pd.api.types.is_numeric_dtype(section_df[c])
     ]
-    for col in sec_numeric_cols:
-        section_df[col] = pd.to_numeric(section_df[col], errors="coerce")
 
     lines["UWI"] = lines["UWI"].astype(str).str.strip()
     points["UWI"] = points["UWI"].astype(str).str.strip()
 
+    # Merge SectionOOIP onto well_df via Section
+    well_df = well_df.merge(
+        section_df[["Section", SECTION_OOIP_COL]], on="Section", how="left"
+    )
+
     return (lines, points, grid, units, infills, lease_lines, merged, land,
-            well_df, section_df, well_numeric_cols, sec_numeric_cols)
+            well_df, section_df, sec_numeric_cols)
 
 
 (lines_gdf, points_gdf, grid_gdf, units_gdf, infills_gdf, lease_lines_gdf,
- merged_gdf, land_gdf, well_df, section_df,
- WELL_NUMERIC_COLS, SEC_NUMERIC_COLS) = load_data()
+ merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS) = load_data()
 
-ALL_METRIC_COLS = WELL_NUMERIC_COLS + SEC_NUMERIC_COLS
+# All metric columns available on prospects (IDW cols + section OOIP)
+ALL_METRIC_COLS = WELL_COLS + [SECTION_OOIP_COL]
 
 # ==========================================================
 # Derived spatial data
 # ==========================================================
 section_enriched = grid_gdf.merge(section_df, on="Section", how="left")
 
-# Combine lines and points into one existing-wells layer (lines preferred)
+# Combine lines and points into one existing-wells layer
 lines_with_uwi = lines_gdf[["UWI", "geometry"]].copy()
 points_only = points_gdf[~points_gdf["UWI"].isin(lines_with_uwi["UWI"])][["UWI", "geometry"]].copy()
 existing_wells = gpd.GeoDataFrame(
@@ -228,12 +225,11 @@ prospects = gpd.GeoDataFrame(
 )
 
 # ==========================================================
-# Analyse prospects — IDW² for Sheet 0 cols, mean for Sheet 1 cols
+# Analyse prospects — IDW² for well-level cols, mean for SectionOOIP
 # ==========================================================
 
-def analyze_prospects(pros, prox, sections, buffer_m, well_metrics, sec_metrics):
+def analyze_prospects(pros, prox, sections, buffer_m):
     pros = pros.copy()
-
     pros["_midpoint"] = pros.geometry.apply(midpoint_of_geom)
     pros["_buffer"] = pros.geometry.buffer(buffer_m, cap_style=2)
 
@@ -255,19 +251,17 @@ def analyze_prospects(pros, prox, sections, buffer_m, well_metrics, sec_metrics)
         for i, ix in enumerate(idxs, 1):
             pros.at[ix, "_section_label"] = f"{lab}-{i}"
 
-    # Buffer GeoDataFrame for spatial joins
     buffer_gdf = gpd.GeoDataFrame(
         {"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs,
     )
 
-    # --- IDW² for well-level (Sheet 0) metrics ---
+    # --- IDW² for well-level metrics ---
     midpt_gdf = prox[prox["_midpoint"].notna()].copy()
     midpt_gdf = midpt_gdf.set_geometry(
         gpd.GeoSeries(midpt_gdf["_midpoint"], crs=prox.crs)
     )
     well_hits = gpd.sjoin(midpt_gdf, buffer_gdf, how="inner", predicate="within")
 
-    # Compute distances for IDW
     px_pts = well_hits["index_right"].map(lambda i: pros.at[i, "_midpoint"])
     well_hits["_dist"] = np.sqrt(
         (well_hits["_midpoint"].apply(lambda pt: pt.x) - px_pts.apply(lambda pt: pt.x if pt else np.nan)) ** 2 +
@@ -276,10 +270,7 @@ def analyze_prospects(pros, prox, sections, buffer_m, well_metrics, sec_metrics)
     well_hits["_w"] = 1.0 / (well_hits["_dist"] ** 2)
 
     idw_results = {}
-    for col in well_metrics:
-        if col not in well_hits.columns:
-            idw_results[col] = pd.Series(np.nan, index=pros.index)
-            continue
+    for col in WELL_COLS:
         valid = well_hits[well_hits[col].notna() & well_hits["_w"].notna()].copy()
         if valid.empty:
             idw_results[col] = pd.Series(np.nan, index=pros.index)
@@ -291,37 +282,32 @@ def analyze_prospects(pros, prox, sections, buffer_m, well_metrics, sec_metrics)
     proximal_count = well_hits.groupby("index_right").size().reindex(pros.index, fill_value=0)
     proximal_uwis = (
         well_hits.groupby("index_right")["UWI"]
-        .apply(lambda x: ",".join(x.astype(str)))
+        .apply(lambda x: ", ".join(x.astype(str)))
         .reindex(pros.index, fill_value="")
     )
 
-    # --- Simple mean for section-level (Sheet 1) metrics ---
-    sec_cols_needed = [c for c in sec_metrics if c in sections.columns]
+    # --- Mean SectionOOIP from intersecting grid cells ---
     sec_join = gpd.sjoin(
-        sections[["geometry"] + sec_cols_needed], buffer_gdf,
+        sections[["geometry", SECTION_OOIP_COL]], buffer_gdf,
         how="inner", predicate="intersects",
     )
-    sec_results = {}
-    for col in sec_cols_needed:
-        sec_results[col] = sec_join.groupby("index_right")[col].mean().reindex(pros.index)
+    ooip_mean = sec_join.groupby("index_right")[SECTION_OOIP_COL].mean().reindex(pros.index)
 
-    # Assemble output
+    # Assemble
     out = pd.DataFrame(index=pros.index)
     out["_prospect_type"] = pros["_prospect_type"].values
     out["_section_label"] = pros["_section_label"].values
     out["Proximal_Count"] = proximal_count.values
     out["_proximal_uwis"] = proximal_uwis.values
-    for col in well_metrics:
-        out[col] = idw_results.get(col, pd.Series(np.nan, index=pros.index)).values
-    for col in sec_cols_needed:
-        out[col] = sec_results.get(col, pd.Series(np.nan, index=pros.index)).values
+    for col in WELL_COLS:
+        out[col] = idw_results[col].values
+    out[SECTION_OOIP_COL] = ooip_mean.values
 
     return out
 
 
 prospect_metrics = analyze_prospects(
-    prospects, proximal_wells, section_enriched,
-    buffer_distance, WELL_NUMERIC_COLS, SEC_NUMERIC_COLS,
+    prospects, proximal_wells, section_enriched, buffer_distance,
 )
 
 for c in prospect_metrics.columns:
@@ -333,123 +319,61 @@ for col in ALL_METRIC_COLS:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
 # ==========================================================
-# Classification — fuzzy-match columns, build field data, classify
+# Classification
 # ==========================================================
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 Classification Settings")
 
-all_prospect_numeric = [
-    c for c in prospects.columns
-    if c not in ("geometry", "Label", "_prospect_type", "_section_label",
-                 "_proximal_uwis", "Proximal_Count")
-    and pd.api.types.is_numeric_dtype(prospects[c])
-]
+st.sidebar.markdown("**Classification weights (must sum to 100):**")
+cw_eur = st.sidebar.number_input("EUR weight %", 0, 100, 50, key="cw_eur")
+cw_1y = st.sidebar.number_input("1Y weight %", 0, 100, 25, key="cw_1y")
+cw_ip90 = st.sidebar.number_input("IP90 weight %", 0, 100, 25, key="cw_ip90")
+cw_sum = cw_eur + cw_1y + cw_ip90
 
-ooip_guess = fuzzy_find(all_prospect_numeric, ["ooip", "oil in place", "original oil"])
-eur_guess = fuzzy_find(all_prospect_numeric, ["eur", "ultimate recovery", "estimated ultimate"])
-ip90_guess = fuzzy_find(all_prospect_numeric, ["ip90", "ip 90", "initial production 90", "initial potential"])
-y1_guess = fuzzy_find(all_prospect_numeric, ["1y", "1 year", "first year", "cuml 1", "cumulative 1"])
-
-col_options = ["(none)"] + all_prospect_numeric
-
-def _default_idx(options, guess):
-    if guess and guess in options:
-        return options.index(guess)
-    return 0
-
-cls_ooip = st.sidebar.selectbox("OOIP column", col_options, index=_default_idx(col_options, ooip_guess), key="cls_ooip")
-cls_eur = st.sidebar.selectbox("EUR column", col_options, index=_default_idx(col_options, eur_guess), key="cls_eur")
-cls_ip90 = st.sidebar.selectbox("IP90 column", col_options, index=_default_idx(col_options, ip90_guess), key="cls_ip90")
-cls_1y = st.sidebar.selectbox("1Y Cumulative column", col_options, index=_default_idx(col_options, y1_guess), key="cls_1y")
-
-cls_cols = {
-    "OOIP": cls_ooip if cls_ooip != "(none)" else None,
-    "EUR": cls_eur if cls_eur != "(none)" else None,
-    "IP90": cls_ip90 if cls_ip90 != "(none)" else None,
-    "1Y": cls_1y if cls_1y != "(none)" else None,
-}
-
-cls_missing = [k for k, v in cls_cols.items() if v is None]
 classification_ready = False
 
-if cls_missing:
-    st.sidebar.warning(f"Missing column mappings: {cls_missing}")
+if cw_sum != 100:
+    st.sidebar.error(f"Weights sum to {cw_sum}%, must be 100%")
 else:
-    st.sidebar.markdown("**Classification weights (must sum to 100):**")
-    cw_eur = st.sidebar.number_input("EUR weight %", 0, 100, 50, key="cw_eur")
-    cw_1y = st.sidebar.number_input("1Y weight %", 0, 100, 25, key="cw_1y")
-    cw_ip90 = st.sidebar.number_input("IP90 weight %", 0, 100, 25, key="cw_ip90")
-    cw_sum = cw_eur + cw_1y + cw_ip90
+    st.sidebar.success(f"Weights: EUR {cw_eur}%, 1Y {cw_1y}%, IP90 {cw_ip90}%")
+    cls_threshold = st.sidebar.slider("Composite Z threshold (σ)", 0.1, 2.0, 0.5, 0.05, key="cls_thresh")
 
-    if cw_sum != 100:
-        st.sidebar.error(f"Weights sum to {cw_sum}%, must be 100%")
-    else:
-        st.sidebar.success(f"Weights: EUR {cw_eur}%, 1Y {cw_1y}%, IP90 {cw_ip90}%")
-        cls_threshold = st.sidebar.slider("Composite Z threshold (σ)", 0.1, 2.0, 0.5, 0.05, key="cls_thresh")
-        classification_ready = True
-
-# --- Run classification ---
-# Field data: group Sheet 0 wells by Section, average all numeric cols per section
-if classification_ready:
-    ooip_col = cls_cols["OOIP"]
-    eur_col = cls_cols["EUR"]
-    ip90_col = cls_cols["IP90"]
-    y1_col = cls_cols["1Y"]
-
-    # Determine which classification cols come from which sheet
-    well_cls_cols = [c for c in [eur_col, ip90_col, y1_col] if c in WELL_NUMERIC_COLS]
-    sec_cls_cols = [c for c in [ooip_col, eur_col, ip90_col, y1_col] if c in SEC_NUMERIC_COLS]
-
-    # Build field data: average Sheet 0 numeric cols by Section
-    field_from_wells = (
-        well_df.dropna(subset=["Section"])
-        .groupby("Section")[WELL_NUMERIC_COLS]
-        .mean()
-    )
-
-    # Merge in any Section-level (Sheet 1) columns
-    sec_indexed = section_df.set_index("Section")
-    for col in SEC_NUMERIC_COLS:
-        if col not in field_from_wells.columns:
-            field_from_wells[col] = sec_indexed[col].reindex(field_from_wells.index)
-        else:
-            # Section-level overrides well-level for same-named columns
-            field_from_wells[col] = sec_indexed[col].reindex(field_from_wells.index).combine_first(
-                field_from_wells[col]
-            )
-
-    # Rename to standard names for modelling
-    rename_map = {ooip_col: "OOIP", eur_col: "EUR", ip90_col: "IP90", y1_col: "1Y"}
-    field = field_from_wells.rename(columns=rename_map)
-    field = field.dropna(subset=["OOIP", "EUR", "IP90", "1Y"])
+    # Build field data: each UWI's metric / SectionOOIP
+    field = well_df.dropna(subset=[SECTION_OOIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90"]).copy()
+    field = field[field[SECTION_OOIP_COL] > 0].copy()
 
     if len(field) >= 2:
-        eur_model = fit_trend(field["OOIP"], field["EUR"])
-        ip90_model = fit_trend(field["OOIP"], field["IP90"])
-        y1_model = fit_trend(field["OOIP"], field["1Y"])
+        field["EUR_ratio"] = field["Norm EUR"] / field[SECTION_OOIP_COL]
+        field["Y1_ratio"] = field["Norm 1Y Cuml"] / field[SECTION_OOIP_COL]
+        field["IP90_ratio"] = field["Norm IP90"] / field[SECTION_OOIP_COL]
+
+        eur_model = fit_trend(field[SECTION_OOIP_COL], field["Norm EUR"])
+        ip90_model = fit_trend(field[SECTION_OOIP_COL], field["Norm IP90"])
+        y1_model = fit_trend(field[SECTION_OOIP_COL], field["Norm 1Y Cuml"])
 
         if all(m is not None for m in [eur_model, ip90_model, y1_model]):
-            # Field residual std (entire set for z-scores)
-            field["EUR_resid"] = field["EUR"] - eur_model.predict(field["OOIP"].values.reshape(-1, 1))
-            field["IP90_resid"] = field["IP90"] - ip90_model.predict(field["OOIP"].values.reshape(-1, 1))
-            field["Y1_resid"] = field["1Y"] - y1_model.predict(field["OOIP"].values.reshape(-1, 1))
+            field["EUR_resid"] = field["Norm EUR"] - eur_model.predict(field[SECTION_OOIP_COL].values.reshape(-1, 1))
+            field["IP90_resid"] = field["Norm IP90"] - ip90_model.predict(field[SECTION_OOIP_COL].values.reshape(-1, 1))
+            field["Y1_resid"] = field["Norm 1Y Cuml"] - y1_model.predict(field[SECTION_OOIP_COL].values.reshape(-1, 1))
             eur_std = field["EUR_resid"].std()
             ip90_std = field["IP90_resid"].std()
             y1_std = field["Y1_resid"].std()
 
-            # Classify ALL prospects (z-scores against entire set)
-            p = prospects.copy()
-            pros_cls = p.dropna(subset=[ooip_col, eur_col, ip90_col, y1_col]).copy()
+            # Classify prospects
+            pros_cls = prospects.dropna(
+                subset=[SECTION_OOIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90"]
+            ).copy()
+            pros_cls = pros_cls[pros_cls[SECTION_OOIP_COL] > 0].copy()
 
             if not pros_cls.empty:
-                ooip_vals = pros_cls[ooip_col].values.reshape(-1, 1)
+                ooip_vals = pros_cls[SECTION_OOIP_COL].values.reshape(-1, 1)
                 pros_cls["EUR_pred"] = eur_model.predict(ooip_vals)
                 pros_cls["IP90_pred"] = ip90_model.predict(ooip_vals)
                 pros_cls["Y1_pred"] = y1_model.predict(ooip_vals)
 
-                pros_cls["Z_EUR"] = (pros_cls[eur_col] - pros_cls["EUR_pred"]) / eur_std if eur_std > 0 else 0
-                pros_cls["Z_IP90"] = (pros_cls[ip90_col] - pros_cls["IP90_pred"]) / ip90_std if ip90_std > 0 else 0
-                pros_cls["Z_1Y"] = (pros_cls[y1_col] - pros_cls["Y1_pred"]) / y1_std if y1_std > 0 else 0
+                pros_cls["Z_EUR"] = (pros_cls["Norm EUR"] - pros_cls["EUR_pred"]) / eur_std if eur_std > 0 else 0
+                pros_cls["Z_IP90"] = (pros_cls["Norm IP90"] - pros_cls["IP90_pred"]) / ip90_std if ip90_std > 0 else 0
+                pros_cls["Z_1Y"] = (pros_cls["Norm 1Y Cuml"] - pros_cls["Y1_pred"]) / y1_std if y1_std > 0 else 0
 
                 pros_cls["Composite_Z"] = (
                     (cw_eur / 100) * pros_cls["Z_EUR"] +
@@ -460,19 +384,17 @@ if classification_ready:
                     lambda z: classify_label(z, cls_threshold)
                 )
 
-                # Write back
                 for col in ["Classification", "Composite_Z", "Z_EUR", "Z_IP90", "Z_1Y"]:
                     prospects[col] = np.nan
                     prospects.loc[pros_cls.index, col] = pros_cls[col]
+
+                classification_ready = True
             else:
-                st.warning("No prospects have valid data for all 4 classification columns.")
-                classification_ready = False
+                st.sidebar.warning("No prospects have valid data for classification.")
         else:
-            st.warning("Could not fit trend lines (insufficient data).")
-            classification_ready = False
+            st.sidebar.warning("Could not fit trend lines (insufficient data).")
     else:
-        st.warning(f"Only {len(field)} sections with complete field data — need ≥ 2.")
-        classification_ready = False
+        st.sidebar.warning(f"Only {len(field)} UWIs with complete data — need ≥ 2.")
 
 # ==========================================================
 # Sidebar — Filters
@@ -544,12 +466,12 @@ if selected_metric == "High-Grade Score":
 else:
     hg_selected, hg_lower_better, hg_weights, total_weight = {}, {}, {}, 0
 
-# Compute High-Grade Score (z-scores against ENTIRE set, not just filtered)
+# Compute High-Grade Score
 if selected_metric == "High-Grade Score" and total_weight == 100 and hg_selected:
     passing = p[p["_passes_filter"]].copy()
     hgs = pd.Series(0.0, index=passing.index)
     for col in hg_selected:
-        z = zscore_full(passing[col], p[col])  # z-score against entire set
+        z = zscore_full(passing[col], p[col])
         if hg_lower_better.get(col, False):
             z = -z
         hgs += (hg_weights[col] / 100.0) * z
@@ -597,10 +519,8 @@ section_display = section_enriched.to_crs(4326)
 units_display = units_gdf.to_crs(4326)
 land_display = land_gdf.to_crs(4326)
 
-existing_display_cols = ["UWI", "geometry"] + [
-    c for c in well_df.columns if c not in ("UWI", "Section") and c in proximal_wells.columns
-]
-existing_display = proximal_wells[existing_display_cols].copy().to_crs(4326)
+# Existing wells display — all available columns
+existing_display = proximal_wells.copy().to_crs(4326)
 
 # Buffer GeoDataFrame
 buffer_records = []
@@ -622,15 +542,11 @@ for idx, row in p.iterrows():
 
 buffer_gdf = gpd.GeoDataFrame(buffer_records, crs=p.crs).to_crs(4326)
 
-# Prospect lines for display
-keep_cols = ["Label", "_prospect_type", "Proximal_Count", "geometry"]
-keep_cols += [c for c in ALL_METRIC_COLS if c in p.columns]
-if "HighGradeScore" in p.columns:
-    keep_cols.append("HighGradeScore")
-if "Classification" in p.columns:
-    keep_cols.append("Classification")
-keep_cols = list(dict.fromkeys(keep_cols))
-p_lines = p[[c for c in keep_cols if c in p.columns]].copy()
+# Prospect lines for display — everything available
+skip_cols = {"geometry", "_buffer", "_midpoint", "_passes_filter", "_no_proximal",
+             "_buffer_color", "_section_label", "_proximal_uwis"}
+keep_cols = [c for c in p.columns if c not in skip_cols]
+p_lines = p[keep_cols + ["geometry"]].copy()
 for c in p_lines.columns:
     if c != "geometry" and p_lines[c].dtype == object:
         p_lines[c] = p_lines[c].astype(str)
@@ -721,7 +637,8 @@ if section_gradient != "None" and section_gradient in section_display.columns:
 else:
     sec_style = lambda _: NULL_STYLE
 
-sec_tip_fields = ["Section"] + [c for c in SEC_NUMERIC_COLS if c in section_display.columns]
+# Section tooltip — show everything available
+sec_tip_fields = [c for c in section_display.columns if c != "geometry"]
 section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
 folium.GeoJson(
     section_display.to_json(), style_function=sec_style,
@@ -746,11 +663,15 @@ folium.FeatureGroup(name="Units", show=True).add_child(
 buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 for _, brow in buffer_gdf[buffer_gdf["_passes_filter"]].iterrows():
     fc = label_color_map.get(brow["Label"], "#cccccc")
+    # Tooltip — show everything
     tip_parts = [f"<b>{brow['Label']}</b>", f"Proximal Wells: {brow.get('Proximal_Count', '—')}"]
     for col in ALL_METRIC_COLS:
         if col in brow.index and pd.notna(brow[col]):
             v = brow[col]
             tip_parts.append(f"{col}: {v:,.0f}" if abs(v) > 100 else f"{col}: {v:.3f}")
+    if metric_col in brow.index and pd.notna(brow[metric_col]) and metric_col not in ALL_METRIC_COLS:
+        v = brow[metric_col]
+        tip_parts.append(f"{metric_col}: {v:.3f}")
     folium.GeoJson(
         brow.geometry.__geo_interface__,
         style_function=lambda _, _fc=fc: {
@@ -786,14 +707,12 @@ well_fg = folium.FeatureGroup(name="Existing Wells")
 line_wells = existing_display[existing_display.geometry.type != "Point"]
 point_wells = existing_display[existing_display.geometry.type == "Point"]
 
-well_tip_fields = ["UWI"] + [
-    c for c in well_df.columns
-    if c not in ("UWI", "Section") and c in existing_display.columns and existing_display[c].notna().any()
-]
+# Well tooltip — show everything
+well_tip_fields = [c for c in existing_display.columns if c not in ("geometry", "_midpoint")]
 
 if not line_wells.empty:
     folium.GeoJson(
-        line_wells.to_json(),
+        line_wells[[c for c in well_tip_fields] + ["geometry"]].to_json(),
         style_function=lambda _: {"color": "transparent", "weight": 15, "opacity": 0},
         highlight_function=lambda _: {"weight": 15, "color": "#555", "opacity": 0.3},
         tooltip=folium.GeoJsonTooltip(
@@ -817,9 +736,9 @@ if not line_wells.empty:
             ).add_to(well_fg)
 
 for _, row in point_wells.iterrows():
-    tip_parts = [f"<b>UWI:</b> {row.get('UWI', '—')}"]
-    for col in well_df.columns:
-        if col in ("UWI", "Section") or col not in row.index or pd.isna(row[col]):
+    tip_parts = []
+    for col in well_tip_fields:
+        if col not in row.index or pd.isna(row[col]):
             continue
         v = row[col]
         if isinstance(v, (int, float)):
@@ -847,6 +766,7 @@ if has_classification:
         cls_val = row.get("Classification", None)
         line_color = COLOR_MAP_CLASS.get(cls_val, "red") if pd.notna(cls_val) else "red"
 
+        # Tooltip — everything
         tip_parts = [
             f"<b>{c}:</b> {row[c]}"
             for c in p_lines_display.columns if c != "geometry"
@@ -892,7 +812,7 @@ folium.LayerControl(collapsed=True).add_to(m)
 st_folium(m, use_container_width=True, height=900, returned_objects=[])
 
 # ==========================================================
-# CLASSIFICATION RESULTS (below map, displayed first)
+# CLASSIFICATION RESULTS
 # ==========================================================
 if classification_ready and "Classification" in p.columns:
     st.markdown("---")
@@ -901,41 +821,38 @@ if classification_ready and "Classification" in p.columns:
     pros_chart = p[p["_passes_filter"] & p["Classification"].notna()].copy()
 
     if not pros_chart.empty:
-        ooip_col = cls_cols["OOIP"]
-        eur_col = cls_cols["EUR"]
-        ip90_col = cls_cols["IP90"]
-        y1_col = cls_cols["1Y"]
-
         col1, col2 = st.columns(2)
 
+        x_range = np.linspace(field[SECTION_OOIP_COL].min(), field[SECTION_OOIP_COL].max(), 100)
+
         with col1:
+            # EUR vs SectionOOIP
             fig_eur = px.scatter(
-                pros_chart, x=ooip_col, y=eur_col,
+                pros_chart, x=SECTION_OOIP_COL, y="Norm EUR",
                 color="Classification", color_discrete_map=COLOR_MAP_CLASS,
-                hover_data=["Label"], title="EUR vs OOIP",
+                hover_data=["Label"], title="Norm EUR vs SectionOOIP",
             )
             fig_eur.add_trace(go.Scatter(
-                x=field["OOIP"], y=field["EUR"],
-                mode="markers", name="Field Sections",
-                marker=dict(color="lightgrey", size=6),
+                x=field[SECTION_OOIP_COL], y=field["Norm EUR"],
+                mode="markers", name="Field UWIs",
+                marker=dict(color="lightgrey", size=4, opacity=0.5),
             ))
-            # Add trend line
-            x_range = np.linspace(field["OOIP"].min(), field["OOIP"].max(), 100)
             fig_eur.add_trace(go.Scatter(
                 x=x_range, y=eur_model.predict(x_range.reshape(-1, 1)),
                 mode="lines", name="Trend", line=dict(color="black", dash="dash"),
             ))
             st.plotly_chart(fig_eur, use_container_width=True)
 
+            # IP90 vs SectionOOIP
             fig_ip90 = px.scatter(
-                pros_chart, x=ooip_col, y=ip90_col,
+                pros_chart, x=SECTION_OOIP_COL, y="Norm IP90",
                 color="Classification", color_discrete_map=COLOR_MAP_CLASS,
-                hover_data=["Label"], title="IP90 vs OOIP",
+                hover_data=["Label"], title="Norm IP90 vs SectionOOIP",
             )
             fig_ip90.add_trace(go.Scatter(
-                x=field["OOIP"], y=field["IP90"],
-                mode="markers", name="Field Sections",
-                marker=dict(color="lightgrey", size=6),
+                x=field[SECTION_OOIP_COL], y=field["Norm IP90"],
+                mode="markers", name="Field UWIs",
+                marker=dict(color="lightgrey", size=4, opacity=0.5),
             ))
             fig_ip90.add_trace(go.Scatter(
                 x=x_range, y=ip90_model.predict(x_range.reshape(-1, 1)),
@@ -944,15 +861,16 @@ if classification_ready and "Classification" in p.columns:
             st.plotly_chart(fig_ip90, use_container_width=True)
 
         with col2:
+            # 1Y Cuml vs SectionOOIP
             fig_1y = px.scatter(
-                pros_chart, x=ooip_col, y=y1_col,
+                pros_chart, x=SECTION_OOIP_COL, y="Norm 1Y Cuml",
                 color="Classification", color_discrete_map=COLOR_MAP_CLASS,
-                hover_data=["Label"], title="1Y Cumulative vs OOIP",
+                hover_data=["Label"], title="Norm 1Y Cuml vs SectionOOIP",
             )
             fig_1y.add_trace(go.Scatter(
-                x=field["OOIP"], y=field["1Y"],
-                mode="markers", name="Field Sections",
-                marker=dict(color="lightgrey", size=6),
+                x=field[SECTION_OOIP_COL], y=field["Norm 1Y Cuml"],
+                mode="markers", name="Field UWIs",
+                marker=dict(color="lightgrey", size=4, opacity=0.5),
             ))
             fig_1y.add_trace(go.Scatter(
                 x=x_range, y=y1_model.predict(x_range.reshape(-1, 1)),
@@ -960,8 +878,9 @@ if classification_ready and "Classification" in p.columns:
             ))
             st.plotly_chart(fig_1y, use_container_width=True)
 
+            # Composite Z
             fig_comp = px.scatter(
-                pros_chart, x=ooip_col, y="Composite_Z",
+                pros_chart, x=SECTION_OOIP_COL, y="Composite_Z",
                 color="Classification", color_discrete_map=COLOR_MAP_CLASS,
                 hover_data=["Label"], title="Composite Z-Score",
             )
@@ -972,15 +891,15 @@ if classification_ready and "Classification" in p.columns:
             fig_comp.add_hline(y=0, line_dash="dash", line_color="black")
             st.plotly_chart(fig_comp, use_container_width=True)
 
-        # Summary table
+        # Summary
         st.subheader("Summary")
         summary = pros_chart["Classification"].value_counts().reset_index()
         summary.columns = ["Classification", "Count"]
         st.dataframe(summary, use_container_width=True)
 
-        # Detailed classification table
+        # Detailed table
         cls_display = pros_chart[[
-            "Label", ooip_col, eur_col, ip90_col, y1_col,
+            "Label", SECTION_OOIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90",
             "Z_EUR", "Z_IP90", "Z_1Y", "Composite_Z", "Classification"
         ]].copy()
         cls_display = cls_display.sort_values("Composite_Z", ascending=False).reset_index(drop=True)
@@ -994,7 +913,7 @@ if classification_ready and "Classification" in p.columns:
         st.warning("No prospects with complete data for classification charts.")
 
 # ==========================================================
-# RANKING (below classification)
+# RANKING
 # ==========================================================
 st.markdown("---")
 st.header("📊 Prospect Ranking")
@@ -1006,7 +925,7 @@ elif rank_df is None or rank_df.empty:
 else:
     st.caption(
         f"Ranked by **{selected_metric}** · {len(rank_df)} prospects · "
-        f"Buffer: {buffer_distance}m · Sheet 0: IDW² · Sheet 1: Simple Mean"
+        f"Buffer: {buffer_distance}m · IDW² interpolation"
     )
     fmt = {}
     for c in rank_df.columns:
