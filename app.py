@@ -175,6 +175,15 @@ proximal_wells = gpd.GeoDataFrame(
 )
 proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
+# Merge OOIP for classification only
+proximal_wells_classify = proximal_wells.merge(
+    section_df[["Section", ooip_col_name]],
+    on="Section",
+    how="left"
+)
+
+classified_df = classify(proximal_wells_classify)
+
 # ==========================================================
 # Sidebar
 # ==========================================================
@@ -478,15 +487,15 @@ if enable_classification and classification_ready:
     y1_col_name = cls_cols_chosen["1Y"]
 
     field_section_avg = (
-    proximal_wells
+    proximal_wells_classify
     .dropna(subset=["Section"])
     selected_cols = [
     c for c in [ooip_col_name, eur_col_name, ip90_col_name, y1_col_name]
-    if c in proximal_wells.columns
+    if c in proximal_wells_classify.columns
     ]
 
     field_section_avg = (
-    proximal_wells
+    proximal_wells_classify
     .dropna(subset=["Section"])
     .groupby("Section")[selected_cols]
     .mean()
