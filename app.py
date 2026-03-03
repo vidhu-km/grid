@@ -489,14 +489,6 @@ if enable_classification and classification_ready:
     field_section_avg = (
     proximal_wells_classify
     .dropna(subset=["Section"])
-    selected_cols = [
-    c for c in [ooip_col_name, eur_col_name, ip90_col_name, y1_col_name]
-    if c in proximal_wells_classify.columns
-    ]
-
-    field_section_avg = (
-    proximal_wells_classify
-    .dropna(subset=["Section"])
     .groupby("Section")[selected_cols]
     .mean()
     )
