@@ -38,6 +38,8 @@ SECTION_OOIP_COL = "SectionOOIP"
 # Helpers
 # ==========================================================
 
+
+
 def safe_range(series):
     vals = series.replace([np.inf, -np.inf], np.nan).dropna()
     if vals.empty:
@@ -722,8 +724,17 @@ if not line_wells.empty:
                   "border:1px solid #333;border-radius:3px;",
         ),
     ).add_to(well_fg)
+    
+    # Drop non-JSON-serializable columns before exporting
+    line_wells_clean = line_wells.drop(columns=["_midpoint"], errors="ignore").copy()
+
+    # Convert any remaining object columns to string (safe fallback)
+    for c in line_wells_clean.columns:
+        if c != "geometry" and line_wells_clean[c].dtype == object:
+            line_wells_clean[c] = line_wells_clean[c].astype(str)
+
     folium.GeoJson(
-        line_wells.to_json(),
+        line_wells_clean.to_json(),
         style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
     ).add_to(well_fg)
 
