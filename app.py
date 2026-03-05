@@ -262,24 +262,6 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     pros["_midpoint"] = pros.geometry.apply(midpoint_of_geom)
     pros["_buffer"] = pros.geometry.buffer(buffer_m, cap_style=2)
 
-    # Section label from endpoint
-    endpoints = gpd.GeoDataFrame(
-        {"_pidx": pros.index, "geometry": pros.geometry.apply(endpoint_of_geom)},
-        crs=pros.crs,
-    )
-    endpoints = endpoints[endpoints.geometry.notna()]
-    ep_join = gpd.sjoin(endpoints, sections[["Section", "geometry"]], how="left", predicate="within")
-    ep_join = ep_join.drop_duplicates(subset="_pidx", keep="first")
-    label_map = ep_join.set_index("_pidx")["Section"].fillna("Unknown").astype(str)
-    pros["_section_label"] = pros.index.map(label_map).fillna("Unknown")
-
-    # De-duplicate labels
-    counts = pros["_section_label"].value_counts()
-    for lab in counts[counts > 1].index:
-        idxs = pros[pros["_section_label"] == lab].index
-        for i, ix in enumerate(idxs, 1):
-            pros.at[ix, "_section_label"] = f"{lab}-{i}"
-
     buffer_gdf = gpd.GeoDataFrame(
         {"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs,
     )
@@ -373,7 +355,7 @@ prospect_metrics = analyze_prospects(
 
 for c in prospect_metrics.columns:
     prospects[c] = prospect_metrics[c].values
-prospects["Label"] = prospects["_section_label"]
+prospects["Label"] = prospects["UWI"].astype(str)
 
 for col in ALL_METRIC_COLS:
     if col in prospects.columns:
