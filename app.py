@@ -355,7 +355,15 @@ prospect_metrics = analyze_prospects(
 
 for c in prospect_metrics.columns:
     prospects[c] = prospect_metrics[c].values
-prospects["Label"] = prospects["UWI"].astype(str)
+# Use UWI if available, otherwise create a unique label
+prospects["Label"] = prospects["UWI"].fillna("").astype(str)
+
+# For merged wells (or any missing UWI), generate a unique label
+missing_mask = prospects["Label"] == ""
+prospects.loc[missing_mask, "Label"] = (
+    prospects.loc[missing_mask, "_prospect_type"] + "_" +
+    (prospects.loc[missing_mask].index + 1).astype(str)
+)
 
 for col in ALL_METRIC_COLS:
     if col in prospects.columns:
