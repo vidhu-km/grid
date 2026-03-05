@@ -792,7 +792,7 @@ if not line_wells.empty:
         if ep is not None:
             folium.CircleMarker(
                 location=[ep.y, ep.x], radius=2,
-                color="black", fill=True, fill_color="black", fill_opacity=0.9, weight=1,
+                color="black", fill=True, fill_color="black", fill_opacity=0.9, weight=0.5,
             ).add_to(well_fg)
 
 for _, row in point_wells.iterrows():
@@ -1011,40 +1011,6 @@ else:
         data=rank_df.to_csv().encode("utf-8"),
         file_name="bakken_prospect_rankings.csv", mime="text/csv",
     )
-
-    # Detail panel
-    st.markdown("---")
-    st.subheader("🔬 Prospect Detail")
-    label_list = rank_df["Label"].tolist()
-    detail_label = st.selectbox("Select a prospect", label_list, index=0)
-
-    if detail_label and detail_label in rank_df["Label"].values:
-        dr = rank_df[rank_df["Label"] == detail_label].iloc[0]
-        detail_metrics = [
-            c for c in rank_df.columns
-            if c not in ("Label", "Type", "Percentile", "Classification")
-            and rank_df[c].dtype in [np.float64, np.float32, np.int64, float, int]
-        ]
-        for row_start in range(0, len(detail_metrics), 4):
-            cols = st.columns(4)
-            for ci, mc in enumerate(detail_metrics[row_start:row_start + 4]):
-                val = dr.get(mc, np.nan)
-                if mc in ("Latitude", "Longitude"):
-                    display_val = f"{val:.6f}" if pd.notna(val) else "—"
-                else:
-                    display_val = (
-                        f"{val:,.0f}" if pd.notna(val) and abs(val) > 100
-                        else (f"{val:.3f}" if pd.notna(val) else "—")
-                    )
-                cols[ci].metric(mc, display_val)
-
-        if "Classification" in dr.index and pd.notna(dr["Classification"]):
-            cls_color = COLOR_MAP_CLASS.get(dr["Classification"], "gray")
-            st.markdown(
-                f"**Classification:** <span style='color:{cls_color};font-weight:bold;'>"
-                f"{dr['Classification']}</span>",
-                unsafe_allow_html=True,
-            )
 
 # No-proximal table
 no_prox = p[p["_no_proximal"]]
