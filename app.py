@@ -32,8 +32,8 @@ COLOR_MAP_CLASS = {
 
 WELL_COLS = ["Norm EUR", "Norm 1Y Cuml", "Norm IP90"]
 SECTION_OOIP_COL = "SectionOOIP"
-SECTION_FOIP_COL = "SectionFOIP"                                                    # <-- NEW
-ALL_METRIC_COLS = WELL_COLS + ["WF", SECTION_OOIP_COL, SECTION_FOIP_COL]            # <-- UPDATED
+SECTION_ROIP_COL = "SectionROIP"                                                    # <-- NEW
+ALL_METRIC_COLS = WELL_COLS + ["WF", SECTION_OOIP_COL, SECTION_ROIP_COL]            # <-- UPDATED
 TOOLTIP_STYLE = (
     "font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);"
     "border:1px solid #333;border-radius:3px;"
@@ -173,7 +173,7 @@ def load_data():
 
     section_df["Section"] = section_df["Section"].astype(str).str.strip()
     section_df[SECTION_OOIP_COL] = pd.to_numeric(section_df[SECTION_OOIP_COL], errors="coerce")
-    section_df[SECTION_FOIP_COL] = pd.to_numeric(section_df[SECTION_FOIP_COL], errors="coerce")  # <-- NEW
+    section_df[SECTION_ROIP_COL] = pd.to_numeric(section_df[SECTION_ROIP_COL], errors="coerce")  # <-- NEW
 
     sec_numeric_cols = [
         c for c in section_df.columns
@@ -183,9 +183,9 @@ def load_data():
     lines["UWI"] = lines["UWI"].astype(str).str.strip()
     points["UWI"] = points["UWI"].astype(str).str.strip()
 
-    # Merge both OOIP and FOIP onto well_df
+    # Merge both OOIP and ROIP onto well_df
     well_df_out = well_df.merge(
-        section_df[["Section", SECTION_OOIP_COL, SECTION_FOIP_COL]],  # <-- UPDATED
+        section_df[["Section", SECTION_OOIP_COL, SECTION_ROIP_COL]],  # <-- UPDATED
         on="Section", how="left",
     )
 
@@ -318,14 +318,14 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     else:
         wf_idw = pd.Series(np.nan, index=pros.index)
 
-    # Mean SectionOOIP AND Mean SectionFOIP from intersecting grid cells
+    # Mean SectionOOIP AND Mean SectionROIP from intersecting grid cells
     sec_join = gpd.sjoin(
-        sections[["geometry", SECTION_OOIP_COL, SECTION_FOIP_COL]],  # <-- UPDATED: include FOIP
+        sections[["geometry", SECTION_OOIP_COL, SECTION_ROIP_COL]],  # <-- UPDATED: include ROIP
         buffer_gdf,
         how="inner", predicate="intersects",
     )
     ooip_mean = sec_join.groupby("index_right")[SECTION_OOIP_COL].mean().reindex(pros.index)
-    foip_mean = sec_join.groupby("index_right")[SECTION_FOIP_COL].mean().reindex(pros.index)  # <-- NEW
+    roip_mean = sec_join.groupby("index_right")[SECTION_ROIP_COL].mean().reindex(pros.index)  # <-- NEW
 
     out = pd.DataFrame(index=pros.index)
     out["_prospect_type"] = pros["_prospect_type"].values
@@ -335,7 +335,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
         out[col] = idw_results[col].values
     out["WF"] = wf_idw.values
     out[SECTION_OOIP_COL] = ooip_mean.values
-    out[SECTION_FOIP_COL] = foip_mean.values  # <-- NEW
+    out[SECTION_ROIP_COL] = roip_mean.values  # <-- NEW
     return out
 
 prospect_metrics = analyze_prospects(prospects, proximal_wells, section_enriched, buffer_distance)
@@ -383,22 +383,22 @@ else:
     )
     resource_threshold = st.sidebar.slider(
         "Resource Z threshold (σ)", -1.0, 2.0, 0.0, 0.05,
-        help="Prospects above this FOIP-Z are 'High Resource'",
+        help="Prospects above this ROIP-Z are 'High Resource'",
         key="res_thresh",
     )
 
-    # --- UPDATED: require FOIP instead of just OOIP for field wells ---
-    field = well_df.dropna(subset=[SECTION_FOIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90"]).copy()
-    field = field[field[SECTION_FOIP_COL] > 0].copy()
+    # --- UPDATED: require ROIP instead of just OOIP for field wells ---
+    field = well_df.dropna(subset=[SECTION_ROIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90"]).copy()
+    field = field[field[SECTION_ROIP_COL] > 0].copy()
 
     if len(field) >= 2:
         for ratio_name, src in [("EUR_ratio", "Norm EUR"), ("Y1_ratio", "Norm 1Y Cuml"), ("IP90_ratio", "Norm IP90")]:
-            field[ratio_name] = field[src] / field[SECTION_FOIP_COL]
+            field[ratio_name] = field[src] / field[SECTION_ROIP_COL]
 
-        # --- UPDATED: trend lines fit against SectionFOIP ---
-        eur_model = fit_trend(field[SECTION_FOIP_COL], field["Norm EUR"])
-        ip90_model = fit_trend(field[SECTION_FOIP_COL], field["Norm IP90"])
-        y1_model = fit_trend(field[SECTION_FOIP_COL], field["Norm 1Y Cuml"])
+        # --- UPDATED: trend lines fit against SectionROIP ---
+        eur_model = fit_trend(field[SECTION_ROIP_COL], field["Norm EUR"])
+        ip90_model = fit_trend(field[SECTION_ROIP_COL], field["Norm IP90"])
+        y1_model = fit_trend(field[SECTION_ROIP_COL], field["Norm 1Y Cuml"])
 
         if all(m is not None for m in [eur_model, ip90_model, y1_model]):
             resid_std = {}
@@ -406,22 +406,22 @@ else:
                                      ("IP90", ip90_model, "Norm IP90"),
                                      ("Y1", y1_model, "Norm 1Y Cuml")]:
                 field[f"{tag}_resid"] = (
-                    field[src] - model.predict(field[SECTION_FOIP_COL].values.reshape(-1, 1))
+                    field[src] - model.predict(field[SECTION_ROIP_COL].values.reshape(-1, 1))
                 )
                 resid_std[tag] = field[f"{tag}_resid"].std()
 
-            # --- UPDATED: Resource Z based on FOIP ---
-            field_foip_mean = field[SECTION_FOIP_COL].mean()
-            field_foip_std = field[SECTION_FOIP_COL].std()
+            # --- UPDATED: Resource Z based on ROIP ---
+            field_roip_mean = field[SECTION_ROIP_COL].mean()
+            field_roip_std = field[SECTION_ROIP_COL].std()
 
-            pros_cls = prospects.dropna(subset=[SECTION_FOIP_COL] + WELL_COLS).copy()
-            pros_cls = pros_cls[pros_cls[SECTION_FOIP_COL] > 0].copy()
+            pros_cls = prospects.dropna(subset=[SECTION_ROIP_COL] + WELL_COLS).copy()
+            pros_cls = pros_cls[pros_cls[SECTION_ROIP_COL] > 0].copy()
 
             if not pros_cls.empty:
-                foip_vals = pros_cls[SECTION_FOIP_COL].values.reshape(-1, 1)
-                pros_cls["EUR_pred"] = eur_model.predict(foip_vals)
-                pros_cls["IP90_pred"] = ip90_model.predict(foip_vals)
-                pros_cls["Y1_pred"] = y1_model.predict(foip_vals)
+                roip_vals = pros_cls[SECTION_ROIP_COL].values.reshape(-1, 1)
+                pros_cls["EUR_pred"] = eur_model.predict(roip_vals)
+                pros_cls["IP90_pred"] = ip90_model.predict(roip_vals)
+                pros_cls["Y1_pred"] = y1_model.predict(roip_vals)
 
                 for tag, src, std in [("Z_EUR", "Norm EUR", resid_std["EUR"]),
                                        ("Z_IP90", "Norm IP90", resid_std["IP90"]),
@@ -435,9 +435,9 @@ else:
                     (cw_ip90 / 100) * pros_cls["Z_IP90"]
                 )
 
-                if field_foip_std > 0:
+                if field_roip_std > 0:
                     pros_cls["Resource_Z"] = (
-                        (pros_cls[SECTION_FOIP_COL] - field_foip_mean) / field_foip_std
+                        (pros_cls[SECTION_ROIP_COL] - field_roip_mean) / field_roip_std
                     )
                 else:
                     pros_cls["Resource_Z"] = 0.0
@@ -863,10 +863,10 @@ if classification_ready and "Classification" in p.columns:
     if not pros_chart.empty:
         col1, col2 = st.columns(2)
 
-        # --- UPDATED: x-axis range uses SectionFOIP ---
+        # --- UPDATED: x-axis range uses SectionROIP ---
         x_range = np.linspace(
-            field[SECTION_FOIP_COL].min(),
-            field[SECTION_FOIP_COL].max(),
+            field[SECTION_ROIP_COL].min(),
+            field[SECTION_ROIP_COL].max(),
             100,
         )
 
@@ -879,13 +879,13 @@ if classification_ready and "Classification" in p.columns:
         for y_col, model, target_col in chart_configs:
             with target_col:
                 fig = px.scatter(
-                    pros_chart, x=SECTION_FOIP_COL, y=y_col,  # <-- UPDATED x-axis
+                    pros_chart, x=SECTION_ROIP_COL, y=y_col,  # <-- UPDATED x-axis
                     color="Classification", color_discrete_map=COLOR_MAP_CLASS,
                     hover_data=["Label"],
-                    title=f"{y_col} vs {SECTION_FOIP_COL}",
+                    title=f"{y_col} vs {SECTION_ROIP_COL}",
                 )
                 fig.add_trace(go.Scatter(
-                    x=field[SECTION_FOIP_COL], y=field[y_col],  # <-- UPDATED
+                    x=field[SECTION_ROIP_COL], y=field[y_col],  # <-- UPDATED
                     mode="markers", name="Field UWIs",
                     marker=dict(color="lightgrey", size=4, opacity=0.5),
                 ))
@@ -903,7 +903,7 @@ if classification_ready and "Classification" in p.columns:
                 hover_data=["Label"],
                 title="Productivity Z vs Resource Z (4-Quadrant)",
                 labels={
-                    "Resource_Z": f"Resource Z ({SECTION_FOIP_COL})",  # <-- UPDATED label
+                    "Resource_Z": f"Resource Z ({SECTION_ROIP_COL})",  # <-- UPDATED label
                     "Productivity_Z": "Productivity Z (Composite)",
                 },
             )
@@ -947,10 +947,10 @@ if classification_ready and "Classification" in p.columns:
         summary = summary.sort_values("Classification").reset_index(drop=True)
         st.dataframe(summary, use_container_width=True)
 
-        # --- UPDATED: include FOIP in classification export ---
+        # --- UPDATED: include ROIP in classification export ---
         cls_display = pros_chart[[
             "Label", "Latitude", "Longitude",
-            SECTION_OOIP_COL, SECTION_FOIP_COL,
+            SECTION_OOIP_COL, SECTION_ROIP_COL,
             "Norm EUR", "Norm 1Y Cuml", "Norm IP90", "WF",
             "Z_EUR", "Z_IP90", "Z_1Y", "Productivity_Z", "Resource_Z", "Classification"
         ]].sort_values("Productivity_Z", ascending=False).reset_index(drop=True)
