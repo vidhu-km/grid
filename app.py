@@ -220,9 +220,9 @@ st.sidebar.subheader("🗺️ Section Grid Gradient")
 section_gradient = st.sidebar.selectbox("Colour sections by", ["None"] + SEC_NUMERIC_COLS)
 
 show_layers = {
-    "Infill": st.sidebar.checkbox("Show Infills", value=True),
-    "Lease Line": st.sidebar.checkbox("Show Lease Lines", value=True),
-    "Merged": st.sidebar.checkbox("Show Merged", value=True),
+    "Infill": st.sidebar.checkbox("Show Unit Infills", value=True),
+    "Lease Line": st.sidebar.checkbox("Show Unit Lease Lines", value=True),
+    "Merged": st.sidebar.checkbox("Show Out of Unit Merged Mosaic Inevntory", value=True),
 }
 
 LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
