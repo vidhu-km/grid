@@ -256,6 +256,49 @@ prospects = gpd.GeoDataFrame(
 
 prospects["Label"] = make_prospect_label(prospects)
 unnamed_mask = prospects["Label"].isna() | (prospects["Label"] == "")
+
+# For unnamed prospects, find the section that the last coordinate (endpoint) falls in
+if unnamed_mask.any():
+    # Build a GeoDataFrame of endpoints for unnamed prospects
+    unnamed_endpoints = []
+    for idx in prospects[unnamed_mask].index:
+        ep = endpoint_of_geom(prospects.at[idx, "geometry"])
+        unnamed_endpoints.append({"_pidx": idx, "geometry": ep})
+
+    ep_gdf = gpd.GeoDataFrame(unnamed_endpoints, crs=prospects.crs)
+    ep_gdf = ep_gdf[ep_gdf["geometry"].notna()]  # drop any that couldn't resolve
+
+    if not ep_gdf.empty:
+        # Spatial join: find which section grid cell each endpoint falls within
+        ep_in_section = gpd.sjoin(
+            ep_gdf,
+            grid_gdf[["Section", "geometry"]],
+            how="left",
+            predicate="within",
+        )
+
+        # If "within" misses due to floating-point issues, fall back to "intersects"
+        still_missing = ep_in_section["Section"].isna()
+        if still_missing.any():
+            fallback = gpd.sjoin(
+                ep_gdf.loc[still_missing.index],
+                grid_gdf[["Section", "geometry"]],
+                how="left",
+                predicate="intersects",
+            )
+            # Take the first match per endpoint
+            fallback = fallback[~fallback["Section"].isna()].groupby("_pidx").first()
+            for pidx, row in fallback.iterrows():
+                ep_in_section.loc[
+                    ep_in_section["_pidx"] == pidx, "Section"
+                ] = row["Section"]
+
+        # Assign section names as labels
+        for _, row in ep_in_section.dropna(subset=["Section"]).iterrows():
+            prospects.at[row["_pidx"], "Label"] = str(row["Section"]).strip()
+
+# Final fallback: anything still unnamed gets a generic label
+unnamed_mask = prospects["Label"].isna() | (prospects["Label"] == "")
 prospects.loc[unnamed_mask, "Label"] = ""
 
 # ==========================================================
