@@ -13,6 +13,7 @@ import matplotlib.cm as mpl_cm
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression, RANSACRegressor
+import string
 
 # ==========================================================
 # Page configuration & Constants
@@ -22,7 +23,6 @@ st.set_page_config(layout="wide", page_title="Bakken Inventory Optimizer", page_
 NULL_STYLE = {"fillColor": "#ffffff", "fillOpacity": 0, "color": "#888", "weight": 0.25}
 DEFAULT_BUFFER_M = 900
 
-# ---- 4-quadrant colour scheme ----
 COLOR_MAP_CLASS = {
     "High Prod / High Resource": "#2ca02c",
     "Low Prod / High Resource":  "#ff7f0e",
@@ -38,6 +38,7 @@ TOOLTIP_STYLE = (
     "font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);"
     "border:1px solid #333;border-radius:3px;"
 )
+
 
 # ==========================================================
 # Helpers
@@ -133,6 +134,22 @@ def fmt_val(col, v):
     return f"{v:,.0f}" if abs(v) > 100 else f"{v:.3f}"
 
 
+def _suffix_generator():
+    """Yield A, B, C, … Z, AA, AB, … for unlimited disambiguation."""
+    n = 1
+    while True:
+        for combo in _alpha_combos(n):
+            yield combo
+        n += 1
+
+
+def _alpha_combos(length):
+    if length == 1:
+        return list(string.ascii_uppercase)
+    base = _alpha_combos(length - 1)
+    return [b + c for b in base for c in string.ascii_uppercase]
+
+
 # ==========================================================
 # Load data
 # ==========================================================
@@ -220,9 +237,9 @@ st.sidebar.subheader("🗺️ Section Grid Gradient")
 section_gradient = st.sidebar.selectbox("Colour sections by", ["None"] + SEC_NUMERIC_COLS)
 
 show_layers = {
-    "Infill": st.sidebar.checkbox("Show Unit Infills", value=True),
-    "Lease Line": st.sidebar.checkbox("Show Unit Lease Lines", value=True),
-    "Merged": st.sidebar.checkbox("Show Out of Unit Merged Mosaic Inventory", value=True),
+    "Infill": st.sidebar.checkbox("Show Infills", value=True),
+    "Lease Line": st.sidebar.checkbox("Show Lease Lines", value=True),
+    "Merged": st.sidebar.checkbox("Show Merged", value=True),
 }
 
 LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
@@ -247,13 +264,18 @@ prospects = gpd.GeoDataFrame(
 )
 
 # ==========================================================
-# Label prospects — use UWI if present, else section from endpoint
+# Label prospects
+#   - Use UWI from shapefile if present & non-empty
+#   - Otherwise, use endpoint → section grid spatial join
+#   - Disambiguate multiple prospects in the same section
+#     with suffixes: Section-A, Section-B, …
 # ==========================================================
 prospects["Label"] = make_prospect_label(prospects)
 unnamed_mask = prospects["Label"].isna() | (prospects["Label"] == "")
 prospects["_label_is_section"] = False
 
 if unnamed_mask.any():
+    # Build endpoint GeoDataFrame for unnamed prospects
     unnamed_endpoints = []
     for idx in prospects[unnamed_mask].index:
         ep = endpoint_of_geom(prospects.at[idx, "geometry"])
@@ -263,6 +285,7 @@ if unnamed_mask.any():
     ep_gdf = ep_gdf[ep_gdf["geometry"].notna()]
 
     if not ep_gdf.empty:
+        # Primary join: endpoint within section polygon
         ep_in_section = gpd.sjoin(
             ep_gdf,
             grid_gdf[["Section", "geometry"]],
@@ -270,6 +293,7 @@ if unnamed_mask.any():
             predicate="within",
         )
 
+        # Fallback: intersects for any that didn't land "within"
         still_missing = ep_in_section["Section"].isna()
         if still_missing.any():
             missing_pidxs = ep_in_section.loc[still_missing, "_pidx"].values
@@ -286,10 +310,24 @@ if unnamed_mask.any():
                     mask = ep_in_section["_pidx"] == pidx
                     ep_in_section.loc[mask, "Section"] = row["Section"]
 
+        # Assign raw section names first
         for _, row in ep_in_section.dropna(subset=["Section"]).iterrows():
             prospects.at[row["_pidx"], "Label"] = str(row["Section"]).strip()
             prospects.at[row["_pidx"], "_label_is_section"] = True
 
+    # ── Disambiguate duplicates within the same section ──
+    section_labeled = prospects[prospects["_label_is_section"]].copy()
+    dupes = section_labeled.groupby("Label").filter(lambda g: len(g) > 1)
+
+    if not dupes.empty:
+        for section_name, group in dupes.groupby("Label"):
+            if len(group) == 1:
+                continue
+            suffix_gen = _suffix_generator()
+            for pidx in group.index:
+                prospects.at[pidx, "Label"] = f"{section_name}-{next(suffix_gen)}"
+
+# Fill any still-blank labels
 unnamed_mask = prospects["Label"].isna() | (prospects["Label"] == "")
 prospects.loc[unnamed_mask, "Label"] = ""
 
@@ -536,7 +574,7 @@ existing_display = proximal_wells.copy().to_crs(4326)
 
 
 def build_tooltip_label(row, include_metrics=True):
-    """Build tooltip HTML for prospect wells only."""
+    """Build tooltip HTML for prospect wells."""
     parts = []
     label = row.get("Label", "")
     if label:
@@ -553,7 +591,7 @@ def build_tooltip_label(row, include_metrics=True):
     return "<br>".join(parts) if parts else "Prospect"
 
 
-# Buffer GeoDataFrame — geometry only, no tooltip data needed
+# Buffer GeoDataFrame — no tooltip data needed
 buffer_records = []
 for idx, row in p.iterrows():
     rec = {
@@ -712,7 +750,7 @@ for _, row in point_wells.iterrows():
     ).add_to(well_fg)
 well_fg.add_to(m)
 
-# ── Layer 5: Prospect Buffers (no fill, dashed borders, NO tooltip) ──
+# ── Layer 5: Prospect Buffers (dashed borders, no fill, NO tooltip) ──
 buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 
 BUFFER_STYLE_PASS = {
@@ -754,7 +792,6 @@ buffer_fg.add_to(m)
 prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
 has_classification = classification_ready and "Classification" in p.columns
 
-# Columns to never show in the prospect tooltip
 _TOOLTIP_SKIP = {"geometry", "_label_is_section", "_prospect_type", "_buffer_color"}
 
 for _, row in p_lines_display.iterrows():
@@ -768,10 +805,8 @@ for _, row in p_lines_display.iterrows():
         if c in _TOOLTIP_SKIP:
             continue
         val = row[c]
-        # Skip NaN / empty / literal "nan"
         if pd.isna(val) or str(val).strip() == "" or str(val).strip().lower() == "nan":
             continue
-        # Show the Label line with "Section:" prefix when appropriate
         if c == "Label":
             if is_section:
                 tip_parts.append(f"<b>Section:</b> {val}")
@@ -780,21 +815,22 @@ for _, row in p_lines_display.iterrows():
         else:
             tip_parts.append(f"<b>{c}:</b> {val}")
 
+    tip_html = "<br>".join(tip_parts) if tip_parts else "Prospect"
+
     folium.GeoJson(
         row.geometry.__geo_interface__,
         style_function=lambda _, _lc=line_color: {"color": _lc, "weight": 3, "opacity": 0.9},
         highlight_function=lambda _: {"weight": 5, "color": "#ff4444"},
-        tooltip=folium.Tooltip("<br>".join(tip_parts), sticky=True, style="font-size:12px"),
+        tooltip=folium.Tooltip(tip_html, sticky=True, style="font-size:12px"),
     ).add_to(prospect_fg)
 
     ep = endpoint_of_geom(row.geometry)
     if ep is not None:
-        # Build the same tooltip for the circle marker
         folium.CircleMarker(
             location=[ep.y, ep.x], radius=3,
             color=line_color, fill=True, fill_color=line_color,
             fill_opacity=0.9, weight=1,
-            tooltip=folium.Tooltip("<br>".join(tip_parts), sticky=True, style="font-size:12px"),
+            tooltip=folium.Tooltip(tip_html, sticky=True, style="font-size:12px"),
         ).add_to(prospect_fg)
 
 prospect_fg.add_to(m)
