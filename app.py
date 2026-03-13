@@ -24,10 +24,10 @@ NULL_STYLE = {"fillColor": "#ffffff", "fillOpacity": 0, "color": "#888", "weight
 DEFAULT_BUFFER_M = 900
 
 COLOR_MAP_CLASS = {
-    "High Prod / High Resource": "#2ca02c",
-    "Low Prod / High Resource":  "#ff7f0e",
-    "High Prod / Low Resource":  "#1f77b4",
-    "Low Prod / Low Resource":   "#d62728",
+    "High Nearby Production / High Resource Left": "#2ca02c",
+    "Low Nearby Production / High Resource Left":  "#ff7f0e",
+    "High Nearby Production / Low Resource Left":  "#1f77b4",
+    "Low Nearby Production / Low Resource Left":   "#d62728",
 }
 
 WELL_COLS = ["Norm EUR", "Norm 1Y Cuml", "Norm IP90"]
