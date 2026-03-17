@@ -421,8 +421,8 @@ for col in ALL_METRIC_COLS:
 # Coordinates
 _tf = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 _coords = prospects.geometry.apply(lambda g: prospect_coords_latlon(g, _tf))
-prospects["Latitude"] = _coords.apply(lambda x: x[0])
-prospects["Longitude"] = _coords.apply(lambda x: x[1])
+prospects["BH Latitude"] = _coords.apply(lambda x: x[0])
+prospects["BH Longitude"] = _coords.apply(lambda x: x[1])
 
 # ==========================================================
 # Classification
@@ -934,7 +934,7 @@ if classification_ready and "Classification" in p.columns:
         st.dataframe(summary, use_container_width=True)
 
         cls_display = pros_chart[[
-            "Label", "Latitude", "Longitude",
+            "Label", "BH Latitude", "BH Longitude",
             SECTION_OOIP_COL, SECTION_ROIP_COL,
             "Norm EUR", "Norm 1Y Cuml", "Norm IP90", "WF",
             "Z_EUR", "Z_IP90", "Z_1Y", "Productivity_Z", "Resource_Z", "Classification"
@@ -955,7 +955,7 @@ if not no_prox.empty:
     st.subheader("⚠️ No Proximal Wells Found")
     st.caption(f"{len(no_prox)} prospects have no proximal wells within {buffer_distance}m.")
     st.dataframe(
-        no_prox[["Label", "_prospect_type", "Latitude", "Longitude"]].rename(
+        no_prox[["Label", "_prospect_type", "BH Latitude", "BH Longitude"]].rename(
             columns={"_prospect_type": "Type"}
         ).reset_index(drop=True),
         use_container_width=True,
