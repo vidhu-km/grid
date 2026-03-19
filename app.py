@@ -215,7 +215,7 @@ st.sidebar.title("Map Settings")
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📏 Buffer Distance")
-buffer_distance = st.sidebar.slider("Buffer radius (m)", 100, 2000, DEFAULT_BUFFER_M, step=50)
+buffer_distance = st.sidebar.slider(100, 2000, DEFAULT_BUFFER_M, step=50)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🗺️ Section Grid Gradient")
