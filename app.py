@@ -3,16 +3,15 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import folium
-from folium.plugins import MiniMap, Draw
+from folium.plugins import MiniMap
 from streamlit_folium import st_folium
 import branca.colormap as cm
-from shapely.geometry import Point, LineString
+from shapely.geometry import Point
 from pyproj import Transformer
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression, RANSACRegressor
 import string
-import json
 
 # ==========================================================
 # Page config & Constants
@@ -228,125 +227,6 @@ show_layers = {
 }
 
 # ==========================================================
-# ✏️ Draw Your Own Well — Sidebar Section
-# ==========================================================
-st.sidebar.markdown("---")
-st.sidebar.subheader("✏️ Draw Your Own Well")
-st.sidebar.caption(
-    "Define a custom prospect by specifying two endpoints (lat/lon). "
-    "It will be analysed and classified alongside the loaded prospects."
-)
-
-# Initialize session state for drawn wells
-if "custom_wells" not in st.session_state:
-    st.session_state.custom_wells = []
-
-# Method selector
-draw_method = st.sidebar.radio(
-    "Input method",
-    ["Manual coordinates", "Draw on map"],
-    key="draw_method",
-    horizontal=True,
-)
-
-if draw_method == "Manual coordinates":
-    with st.sidebar.form("draw_well_form"):
-        st.markdown("**Endpoint 1 (Surface / Heel)**")
-        c1a, c1b = st.columns(2)
-        lat1 = c1a.number_input("Lat 1", value=48.0, format="%.6f", key="lat1")
-        lon1 = c1b.number_input("Lon 1", value=-103.5, format="%.6f", key="lon1")
-
-        st.markdown("**Endpoint 2 (Bottom-hole / Toe)**")
-        c2a, c2b = st.columns(2)
-        lat2 = c2a.number_input("Lat 2", value=48.01, format="%.6f", key="lat2")
-        lon2 = c2b.number_input("Lon 2", value=-103.48, format="%.6f", key="lon2")
-
-        well_label = st.text_input("Well label (optional)", value="", key="custom_label")
-        submitted = st.form_submit_button("➕ Add Custom Well")
-
-        if submitted:
-            if (lat1 == lat2) and (lon1 == lon2):
-                st.error("Endpoints must be different!")
-            else:
-                st.session_state.custom_wells.append({
-                    "lat1": lat1, "lon1": lon1,
-                    "lat2": lat2, "lon2": lon2,
-                    "label": well_label.strip() if well_label.strip() else None,
-                })
-                st.success(f"Added custom well ({len(st.session_state.custom_wells)} total)")
-
-elif draw_method == "Draw on map":
-    st.sidebar.info("Draw a line on the mini-map below. The first and last vertices become your well endpoints.")
-
-    # Compute center for the drawing map
-    _bounds = infills_gdf.total_bounds
-    _cx, _cy = (_bounds[0] + _bounds[2]) / 2, (_bounds[1] + _bounds[3]) / 2
-    _tf_draw = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
-    _clon_d, _clat_d = _tf_draw.transform(_cx, _cy)
-
-    draw_map = folium.Map(location=[_clat_d, _clon_d], zoom_start=11, tiles="CartoDB positron",
-                          width=350, height=300)
-
-    Draw(
-        export=False,
-        draw_options={
-            "polyline": {"shapeOptions": {"color": "#ff00ff", "weight": 4}},
-            "polygon": False,
-            "circle": False,
-            "rectangle": False,
-            "marker": False,
-            "circlemarker": False,
-        },
-        edit_options={"edit": False, "remove": True},
-    ).add_to(draw_map)
-
-    with st.sidebar:
-        draw_label = st.text_input("Well label (optional)", value="", key="draw_map_label")
-        draw_result = st_folium(draw_map, height=300, width=350, key="draw_map",
-                                returned_objects=["all_drawings"])
-
-        if draw_result and draw_result.get("all_drawings"):
-            drawings = draw_result["all_drawings"]
-            # Process the most recent drawing
-            for drawing in drawings:
-                geom_type = drawing.get("geometry", {}).get("type", "")
-                coords = drawing.get("geometry", {}).get("coordinates", [])
-                if geom_type == "LineString" and len(coords) >= 2:
-                    lon1_d, lat1_d = coords[0]
-                    lon2_d, lat2_d = coords[-1]
-                    # Check if this well is already added (avoid duplicates on rerun)
-                    new_well = {
-                        "lat1": lat1_d, "lon1": lon1_d,
-                        "lat2": lat2_d, "lon2": lon2_d,
-                        "label": draw_label.strip() if draw_label.strip() else None,
-                    }
-                    # Simple dedup: check if last well is same coords
-                    is_dup = False
-                    if st.session_state.custom_wells:
-                        last = st.session_state.custom_wells[-1]
-                        if (abs(last["lat1"] - new_well["lat1"]) < 1e-7 and
-                            abs(last["lon1"] - new_well["lon1"]) < 1e-7 and
-                            abs(last["lat2"] - new_well["lat2"]) < 1e-7 and
-                            abs(last["lon2"] - new_well["lon2"]) < 1e-7):
-                            is_dup = True
-                    if not is_dup:
-                        st.session_state.custom_wells.append(new_well)
-                        st.success(f"Captured drawn well ({len(st.session_state.custom_wells)} total)")
-
-# Show and manage custom wells list
-if st.session_state.custom_wells:
-    st.sidebar.markdown("**Custom Wells:**")
-    for i, cw in enumerate(st.session_state.custom_wells):
-        lbl = cw["label"] or f"Custom-{i+1}"
-        st.sidebar.markdown(
-            f"` {i+1}` **{lbl}** — "
-            f"({cw['lat1']:.4f}, {cw['lon1']:.4f}) → ({cw['lat2']:.4f}, {cw['lon2']:.4f})"
-        )
-    if st.sidebar.button("🗑️ Clear All Custom Wells"):
-        st.session_state.custom_wells = []
-        st.rerun()
-
-# ==========================================================
 # Build prospect set
 # ==========================================================
 prospect_frames = []
@@ -354,29 +234,10 @@ for name, enabled in show_layers.items():
     if enabled:
         f = LAYER_GDFS[name].copy()
         f["_prospect_type"] = name
-        f["_is_custom"] = False
         prospect_frames.append(f)
 
-# ── Inject custom wells ──
-if st.session_state.custom_wells:
-    tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
-    custom_rows = []
-    for i, cw in enumerate(st.session_state.custom_wells):
-        x1, y1 = tf_to_proj.transform(cw["lon1"], cw["lat1"])
-        x2, y2 = tf_to_proj.transform(cw["lon2"], cw["lat2"])
-        line = LineString([(x1, y1), (x2, y2)])
-        lbl = cw["label"] or f"Custom-{i+1}"
-        custom_rows.append({
-            "geometry": line,
-            "_prospect_type": "Custom",
-            "_is_custom": True,
-            "Label": lbl,
-        })
-    custom_gdf = gpd.GeoDataFrame(custom_rows, crs="EPSG:26913")
-    prospect_frames.append(custom_gdf)
-
 if not prospect_frames:
-    st.error("Enable at least one prospect layer or draw a custom well.")
+    st.error("Enable at least one prospect layer.")
     st.stop()
 
 prospects = gpd.GeoDataFrame(
@@ -384,36 +245,16 @@ prospects = gpd.GeoDataFrame(
     geometry="geometry", crs=infills_gdf.crs,
 )
 
-# Ensure _is_custom column exists
-if "_is_custom" not in prospects.columns:
-    prospects["_is_custom"] = False
-prospects["_is_custom"] = prospects["_is_custom"].fillna(False).astype(bool)
-
 # ==========================================================
 # Label prospects
 # ==========================================================
-# For custom wells, Label is already set; skip those in auto-labelling
-custom_mask_label = prospects["_is_custom"]
-
-if "Label" not in prospects.columns:
-    prospects["Label"] = np.nan
-    prospects["_label_is_section"] = False
-else:
-    # Preserve labels from custom wells, set rest to NaN if empty
-    prospects.loc[~custom_mask_label, "Label"] = prospects.loc[~custom_mask_label].apply(
-        lambda r: r.get("Label", np.nan) if pd.notna(r.get("Label")) and str(r.get("Label", "")).strip() not in ("", "nan") else np.nan, axis=1
-    )
-    if "_label_is_section" not in prospects.columns:
-        prospects["_label_is_section"] = False
-    prospects.loc[custom_mask_label, "_label_is_section"] = False
-
-# Auto-label non-custom prospects that still need labels
 if "UWI" in prospects.columns:
-    non_custom_no_label = ~custom_mask_label & prospects["Label"].isna()
-    uwi_vals = prospects.loc[non_custom_no_label, "UWI"].astype(str).str.strip().replace({"": np.nan, "nan": np.nan})
-    prospects.loc[non_custom_no_label, "Label"] = uwi_vals
+    prospects["Label"] = prospects["UWI"].astype(str).str.strip().replace({"": np.nan, "nan": np.nan})
+else:
+    prospects["Label"] = np.nan
+prospects["_label_is_section"] = False
 
-unnamed_mask = prospects["Label"].isna() & ~custom_mask_label
+unnamed_mask = prospects["Label"].isna()
 if unnamed_mask.any():
     ep_data = prospects.loc[unnamed_mask, "geometry"].apply(endpoint_of_geom)
     valid_ep = ep_data.dropna()
@@ -669,14 +510,11 @@ p["_no_proximal"] = ~has_proximal
 
 n_total, n_passing = len(p), int(filter_mask.sum())
 n_no_proximal = int((~has_proximal).sum())
-n_custom = int(p["_is_custom"].sum())
 
 st.sidebar.markdown(
     f"**{n_passing}** / {n_total} prospects pass filters "
     f"({n_passing / max(n_total, 1) * 100:.0f}%)"
 )
-if n_custom:
-    st.sidebar.info(f"✏️ {n_custom} custom well(s) included")
 if n_no_proximal:
     st.sidebar.warning(f"⚠️ {n_no_proximal} prospects have no nearby proximal wells")
 
@@ -689,16 +527,10 @@ existing_display = proximal_wells.to_crs(4326)
 # Build prospect tooltip HTML as a column (vectorized string ops)
 def _build_tooltip_html(row):
     parts = []
-    is_custom = row.get("_is_custom", False)
-    if is_custom:
-        parts.append("✏️ <b>CUSTOM WELL</b>")
     label = row.get("Label", "")
     if label:
-        if is_custom:
-            parts.append(f"<b>Label:</b> {label}")
-        else:
-            tag = "Section" if row.get("_label_is_section", False) else "UWI"
-            parts.append(f"<b>{tag}:</b> {label}")
+        tag = "Section" if row.get("_label_is_section", False) else "UWI"
+        parts.append(f"<b>{tag}:</b> {label}")
     pc = row.get("Proximal_Count", "—")
     parts.append(f"Proximal Wells: {pc}")
     for col in ALL_METRIC_COLS:
@@ -726,15 +558,11 @@ if has_classification:
 else:
     p["_line_color"] = "red"
 
-# Custom wells get magenta if not classified
-p.loc[p["_is_custom"] & p["_line_color"].eq("red") & ~p.get("Classification", pd.Series(dtype=str)).notna(), "_line_color"] = "#ff00ff"
-
 # Pre-compute buffers in 4326
 buffer_geoms = p.geometry.buffer(buffer_distance, cap_style=2)
 buffer_gdf = gpd.GeoDataFrame({
     "_passes_filter": p["_passes_filter"].values,
     "_no_proximal": p["_no_proximal"].values,
-    "_is_custom": p["_is_custom"].values,
     "geometry": buffer_geoms,
 }, crs=p.crs).to_crs(4326)
 
@@ -743,7 +571,6 @@ p_lines_4326 = gpd.GeoDataFrame({
     "_tooltip": p["_tooltip"].values,
     "_line_color": p["_line_color"].values,
     "_passes_filter": p["_passes_filter"].values,
-    "_is_custom": p["_is_custom"].values,
     "geometry": p.geometry,
 }, crs=p.crs).to_crs(4326)
 
@@ -751,13 +578,10 @@ p_lines_4326 = gpd.GeoDataFrame({
 # Executive summary
 # ==========================================================
 st.title("🛢️ Inventory Classifier")
-summary_parts = [
+st.info(
     f"**{n_passing}** of {n_total} prospects pass filters "
     f"({n_passing / max(n_total, 1) * 100:.0f}%). Buffer: {buffer_distance}m."
-]
-if n_custom:
-    summary_parts.append(f"✏️ **{n_custom}** custom well(s) included in analysis.")
-st.info(" ".join(summary_parts))
+)
 
 # ==========================================================
 # MAP
@@ -877,13 +701,11 @@ buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 buffer_gdf["_bstyle"] = "fail"
 buffer_gdf.loc[buffer_gdf["_passes_filter"], "_bstyle"] = "pass"
 buffer_gdf.loc[buffer_gdf["_no_proximal"], "_bstyle"] = "noprox"
-buffer_gdf.loc[buffer_gdf["_is_custom"], "_bstyle"] = "custom"
 
 _BSTYLES = {
     "pass":   {"fillOpacity": 0, "color": "#000", "weight": 1.2, "opacity": 0.6, "dashArray": "6 4"},
     "fail":   {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.25, "dashArray": "6 4"},
     "noprox": {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.3, "dashArray": "4 6"},
-    "custom": {"fillOpacity": 0.04, "fillColor": "#ff00ff", "color": "#ff00ff", "weight": 1.5, "opacity": 0.7, "dashArray": "4 4"},
 }
 
 folium.GeoJson(
@@ -898,90 +720,26 @@ prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
 for idx, row in p_lines_4326.iterrows():
     lc = row["_line_color"]
     tip = row["_tooltip"]
-    is_custom = row.get("_is_custom", False)
-
-    line_weight = 5 if is_custom else 3
-    line_opacity = 1.0 if is_custom else 0.9
 
     folium.GeoJson(
         row.geometry.__geo_interface__,
-        style_function=lambda _, _lc=lc, _w=line_weight, _o=line_opacity: {
-            "color": _lc, "weight": _w, "opacity": _o
-        },
-        highlight_function=lambda _: {"weight": 7, "color": "#ff4444"},
+        style_function=lambda _, _lc=lc: {"color": _lc, "weight": 3, "opacity": 0.9},
+        highlight_function=lambda _: {"weight": 5, "color": "#ff4444"},
         tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
     ).add_to(prospect_fg)
 
-    # Endpoints — custom wells get star-like markers
-    if is_custom:
-        # Surface / heel (endpoint 1 = start of line)
-        coords = list(row.geometry.coords)
-        if len(coords) >= 1:
-            folium.RegularPolygonMarker(
-                [coords[0][1], coords[0][0]], number_of_sides=4, radius=6,
-                color=lc, fill=True, fill_color=lc, fill_opacity=0.9, weight=2,
-                rotation=45,
-                tooltip=folium.Tooltip(f"✏️ Surface<br>{tip}", sticky=True, style="font-size:12px"),
-            ).add_to(prospect_fg)
-        # Bottom-hole / toe (endpoint 2 = end of line)
-        if len(coords) >= 2:
-            folium.RegularPolygonMarker(
-                [coords[-1][1], coords[-1][0]], number_of_sides=5, radius=8,
-                color=lc, fill=True, fill_color=lc, fill_opacity=0.9, weight=2,
-                tooltip=folium.Tooltip(f"✏️ Bottom-hole<br>{tip}", sticky=True, style="font-size:12px"),
-            ).add_to(prospect_fg)
-    else:
-        ep = endpoint_of_geom(row.geometry)
-        if ep:
-            folium.CircleMarker(
-                [ep.y, ep.x], radius=3, color=lc, fill=True,
-                fill_color=lc, fill_opacity=0.9, weight=1,
-                tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
-            ).add_to(prospect_fg)
+    ep = endpoint_of_geom(row.geometry)
+    if ep:
+        folium.CircleMarker(
+            [ep.y, ep.x], radius=3, color=lc, fill=True,
+            fill_color=lc, fill_opacity=0.9, weight=1,
+            tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
+        ).add_to(prospect_fg)
 
 prospect_fg.add_to(m)
 
 folium.LayerControl(collapsed=True).add_to(m)
 st_folium(m, use_container_width=True, height=900, returned_objects=[])
-
-# ==========================================================
-# Custom Well Results Card
-# ==========================================================
-custom_prospects = p[p["_is_custom"]].copy()
-if not custom_prospects.empty:
-    st.markdown("---")
-    st.header("✏️ Custom Well Results")
-
-    for _, cw_row in custom_prospects.iterrows():
-        label = cw_row.get("Label", "Custom Well")
-        cls = cw_row.get("Classification", None)
-        cls_str = cls if pd.notna(cls) else "Not classified (insufficient proximal data)"
-        cls_color = COLOR_MAP_CLASS.get(cls, "#888") if pd.notna(cls) else "#888"
-
-        with st.expander(f"**{label}** — {cls_str}", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                st.markdown("**Location**")
-                st.markdown(f"BH Lat: `{cw_row.get('BH Latitude', '—')}`")
-                st.markdown(f"BH Lon: `{cw_row.get('BH Longitude', '—')}`")
-                st.markdown(f"Proximal Wells: **{int(cw_row.get('Proximal_Count', 0))}**")
-            with c2:
-                st.markdown("**Metrics (IDW)**")
-                for col in ALL_METRIC_COLS:
-                    val = cw_row.get(col, np.nan)
-                    st.markdown(f"{col}: **{fmt_val(col, val)}**")
-            with c3:
-                st.markdown("**Classification**")
-                st.markdown(
-                    f"<span style='color:{cls_color};font-size:1.3em;font-weight:bold'>"
-                    f"{cls_str}</span>", unsafe_allow_html=True
-                )
-                pz = cw_row.get("Productivity_Z", np.nan)
-                rz = cw_row.get("Resource_Z", np.nan)
-                if pd.notna(pz):
-                    st.markdown(f"Productivity Z: **{pz:.2f}σ**")
-                if pd.notna(rz):
-                    st.markdown(f"Resource Z: **{rz:.2f}σ**")
 
 # ==========================================================
 # Classification Results
@@ -1003,16 +761,10 @@ if classification_ready and "Classification" in p.columns:
             ("Norm IP90", ip90_model, col1),
         ]:
             with target_col:
-                # Build custom symbol column: custom wells get a star
-                chart_df = pros_chart.copy()
-                chart_df["_symbol"] = chart_df["_is_custom"].map({True: "star", False: "circle"})
-
                 fig = px.scatter(
-                    chart_df, x=SECTION_ROIP_COL, y=y_col,
+                    pros_chart, x=SECTION_ROIP_COL, y=y_col,
                     color="Classification", color_discrete_map=COLOR_MAP_CLASS,
-                    symbol="_symbol",
-                    symbol_map={"circle": "circle", "star": "star"},
-                    hover_data=["Label", "_is_custom"], title=f"{y_col} vs {SECTION_ROIP_COL}",
+                    hover_data=["Label"], title=f"{y_col} vs {SECTION_ROIP_COL}",
                 )
                 fig.add_trace(go.Scatter(
                     x=field[SECTION_ROIP_COL], y=field[y_col],
@@ -1023,31 +775,17 @@ if classification_ready and "Classification" in p.columns:
                     x=x_range, y=model.predict(x_range.reshape(-1, 1)),
                     mode="lines", name="Trend", line=dict(color="black", dash="dash"),
                 ))
-                # Make custom well markers larger
-                for trace in fig.data:
-                    if hasattr(trace, 'marker') and trace.marker.symbol == 'star':
-                        trace.marker.size = 14
                 st.plotly_chart(fig, use_container_width=True)
 
         with col2:
-            chart_df = pros_chart.copy()
-            chart_df["_symbol"] = chart_df["_is_custom"].map({True: "star", False: "circle"})
-
             fig_quad = px.scatter(
-                chart_df, x="Resource_Z", y="Productivity_Z",
+                pros_chart, x="Resource_Z", y="Productivity_Z",
                 color="Classification", color_discrete_map=COLOR_MAP_CLASS,
-                symbol="_symbol",
-                symbol_map={"circle": "circle", "star": "star"},
-                hover_data=["Label", "_is_custom"],
+                hover_data=["Label"],
                 title="Productivity Z vs Resource Z (4-Quadrant)",
                 labels={"Resource_Z": f"Resource Z ({SECTION_ROIP_COL})",
                         "Productivity_Z": "Productivity Z (Composite)"},
             )
-
-            # Make custom well markers larger
-            for trace in fig_quad.data:
-                if hasattr(trace, 'marker') and trace.marker.symbol == 'star':
-                    trace.marker.size = 14
 
             rx_min = min(pros_chart["Resource_Z"].min(), -2) - 0.5
             rx_max = max(pros_chart["Resource_Z"].max(), 2) + 0.5
@@ -1086,12 +824,11 @@ if classification_ready and "Classification" in p.columns:
                       use_container_width=True)
 
         cls_display = pros_chart[[
-            "Label", "_is_custom", "BH Latitude", "BH Longitude",
+            "Label", "BH Latitude", "BH Longitude",
             SECTION_OOIP_COL, SECTION_ROIP_COL,
             "Norm EUR", "Norm 1Y Cuml", "Norm IP90", "WF",
             "Z_EUR", "Z_IP90", "Z_1Y", "Productivity_Z", "Resource_Z", "Classification"
         ]].sort_values("Productivity_Z", ascending=False).reset_index(drop=True)
-        cls_display.rename(columns={"_is_custom": "Custom Well"}, inplace=True)
         st.dataframe(cls_display, use_container_width=True)
         st.download_button(
             "📥 Download Classified Prospects",
@@ -1108,8 +845,8 @@ if not no_prox.empty:
     st.subheader("⚠️ No Proximal Wells Found")
     st.caption(f"{len(no_prox)} prospects have no proximal wells within {buffer_distance}m.")
     st.dataframe(
-        no_prox[["Label", "_prospect_type", "_is_custom", "BH Latitude", "BH Longitude"]].rename(
-            columns={"_prospect_type": "Type", "_is_custom": "Custom Well"}
+        no_prox[["Label", "_prospect_type", "BH Latitude", "BH Longitude"]].rename(
+            columns={"_prospect_type": "Type"}
         ).reset_index(drop=True),
         use_container_width=True,
     )
