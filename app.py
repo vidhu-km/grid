@@ -12,7 +12,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression, RANSACRegressor
 import string
-import json
 
 # ==========================================================
 # Page config & Constants
@@ -146,7 +145,6 @@ def _alpha_combos(length):
 
 
 def _coords_key(coords):
-    """Create a hashable key from coordinate list for dedup."""
     return tuple(tuple(round(c, 6) for c in pt) for pt in coords)
 
 
@@ -232,6 +230,21 @@ def load_data():
 LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
 
 # ==========================================================
+# Session state
+# ==========================================================
+if "drawn_wells" not in st.session_state:
+    st.session_state.drawn_wells = []
+if "drawn_coords_set" not in st.session_state:
+    st.session_state.drawn_coords_set = set()
+if "pending_rerun" not in st.session_state:
+    st.session_state.pending_rerun = False
+
+# Handle pending rerun from previous cycle (drawing was captured, now rerun cleanly)
+if st.session_state.pending_rerun:
+    st.session_state.pending_rerun = False
+    # Don't rerun again — just continue with the new data already in session state
+
+# ==========================================================
 # Sidebar
 # ==========================================================
 st.sidebar.title("Settings")
@@ -247,22 +260,13 @@ show_layers = {
     "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
 }
 
-# ==========================================================
-# Session state for drawn wells
-# ==========================================================
-if "drawn_wells" not in st.session_state:
-    st.session_state.drawn_wells = []  # list of {"coords": [...], "label": str}
-if "drawn_coords_set" not in st.session_state:
-    st.session_state.drawn_coords_set = set()  # for fast dedup
-
-# ==========================================================
-# Custom well management UI (sidebar)
-# ==========================================================
+# Custom well management
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
-st.sidebar.caption("Draw a line on the map (heel → toe), then it appears here.")
+st.sidebar.caption("Draw a polyline on the map (heel → toe).")
 
 if st.session_state.drawn_wells:
+    wells_to_delete = []
     for i, cw in enumerate(st.session_state.drawn_wells):
         col_lbl, col_del = st.sidebar.columns([3, 1])
         with col_lbl:
@@ -275,17 +279,22 @@ if st.session_state.drawn_wells:
             st.session_state.drawn_wells[i]["label"] = new_label
         with col_del:
             if st.button("🗑️", key=f"cw_del_{i}"):
-                key = _coords_key(cw["coords"])
-                st.session_state.drawn_coords_set.discard(key)
-                st.session_state.drawn_wells.pop(i)
-                st.rerun()
+                wells_to_delete.append(i)
+
+    if wells_to_delete:
+        for idx in sorted(wells_to_delete, reverse=True):
+            cw = st.session_state.drawn_wells[idx]
+            key = _coords_key(cw["coords"])
+            st.session_state.drawn_coords_set.discard(key)
+            st.session_state.drawn_wells.pop(idx)
+        st.rerun()
 
     if st.sidebar.button("🗑️ Clear All Custom Wells"):
         st.session_state.drawn_wells.clear()
         st.session_state.drawn_coords_set.clear()
         st.rerun()
 else:
-    st.sidebar.info("No custom wells yet. Draw on the map!")
+    st.sidebar.info("No custom wells yet.")
 
 # ==========================================================
 # Build prospect set
@@ -298,7 +307,6 @@ for name, enabled in show_layers.items():
         f["_is_custom"] = False
         prospect_frames.append(f)
 
-# Inject drawn custom wells
 if st.session_state.drawn_wells:
     tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
     custom_rows = []
@@ -387,7 +395,7 @@ if unnamed_mask.any():
 prospects["Label"] = prospects["Label"].fillna("")
 
 # ==========================================================
-# Analyse prospects (vectorized IDW + sum cols)
+# Analyse prospects
 # ==========================================================
 def idw_for_column(hits, col, pros_index):
     valid = hits.loc[hits[col].notna() & hits["_w"].notna()]
@@ -396,13 +404,6 @@ def idw_for_column(hits, col, pros_index):
     wv = valid[col] * valid["_w"]
     g = pd.DataFrame({"_wv": wv, "_w": valid["_w"], "ir": valid["index_right"]}).groupby("ir").sum()
     return (g["_wv"] / g["_w"]).reindex(pros_index)
-
-
-def sum_for_column(hits, col, pros_index):
-    valid = hits.loc[hits[col].notna()]
-    if valid.empty:
-        return pd.Series(0, index=pros_index)
-    return valid.groupby("index_right")[col].sum().reindex(pros_index, fill_value=0)
 
 
 def analyze_prospects(pros, prox, sections, buffer_m):
@@ -653,7 +654,6 @@ else:
 custom_no_cls = p["_is_custom"] & (~p["Classification"].notna() if "Classification" in p.columns else True)
 p.loc[custom_no_cls, "_line_color"] = "#ff00ff"
 
-# Pre-compute buffers in 4326
 buffer_geoms = p.geometry.buffer(buffer_distance, cap_style=2)
 buffer_gdf = gpd.GeoDataFrame({
     "_passes_filter": p["_passes_filter"].values,
@@ -691,7 +691,6 @@ m = folium.Map(location=[clat, clon], zoom_start=11, tiles="CartoDB positron",
                prefer_canvas=True)
 MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 
-# Draw plugin — polyline only
 Draw(
     export=False,
     position="topleft",
@@ -867,45 +866,51 @@ for idx, row in p_lines_4326.iterrows():
             ).add_to(prospect_fg)
 
 prospect_fg.add_to(m)
-
-# ── Add already-drawn custom wells back onto the map so they persist visually ──
-if st.session_state.drawn_wells:
-    for cw in st.session_state.drawn_wells:
-        coords_latlon = [(lat, lon) for lon, lat in cw["coords"]]
-        folium.PolyLine(
-            coords_latlon,
-            color="#ff00ff", weight=4, opacity=0.9, dash_array="8 4",
-        ).add_to(prospect_fg)
-
 folium.LayerControl(collapsed=True).add_to(m)
 
-# Render map — capture last_active_drawing for new draws
-map_result = st_folium(
-    m,
-    use_container_width=True,
-    height=800,
-    returned_objects=["last_active_drawing"],
-)
+# ── Render map ──
+map_col, btn_col = st.columns([6, 1])
+
+with map_col:
+    map_result = st_folium(
+        m,
+        use_container_width=True,
+        height=800,
+        returned_objects=["last_active_drawing"],
+    )
 
 # ==========================================================
-# Process new drawing from the map
+# Process new drawing — NO st.rerun(), use a button instead
 # ==========================================================
+_new_well_detected = False
 if map_result and map_result.get("last_active_drawing"):
     drawing = map_result["last_active_drawing"]
     geom = drawing.get("geometry", {})
     if geom.get("type") == "LineString":
         coords = geom.get("coordinates", [])
         if len(coords) >= 2:
-            # Keep all drawn vertices (heel to toe)
             coord_list = [(c[0], c[1]) for c in coords]
             key = _coords_key(coord_list)
             if key not in st.session_state.drawn_coords_set:
+                _new_well_detected = True
+                # Store it immediately so it's ready
                 st.session_state.drawn_coords_set.add(key)
                 st.session_state.drawn_wells.append({
                     "coords": coord_list,
                     "label": None,
                 })
-                st.rerun()
+                st.session_state.pending_rerun = True
+
+with btn_col:
+    st.write("")  # spacer
+    st.write("")
+    st.write("")
+    if _new_well_detected:
+        st.success("✏️ Well captured!")
+        if st.button("🔄 Classify New Well", type="primary", use_container_width=True):
+            st.rerun()
+    elif st.session_state.drawn_wells:
+        st.info(f"{len(st.session_state.drawn_wells)} custom")
 
 # ==========================================================
 # Custom Well Results
@@ -1035,7 +1040,6 @@ if classification_ready and "Classification" in p.columns:
 
             st.plotly_chart(fig_quad, use_container_width=True)
 
-        # Table
         table_cols = [
             "Label", "_is_custom",
             "Heel Latitude", "Heel Longitude", "BH Latitude", "BH Longitude",
@@ -1057,7 +1061,7 @@ if classification_ready and "Classification" in p.columns:
             file_name="classified_prospects.csv", mime="text/csv",
         )
 
-# No-proximal table
+# No-proximal
 no_prox = p[p["_no_proximal"]]
 if not no_prox.empty:
     with st.expander(f"⚠️ {len(no_prox)} prospects with no proximal wells within {buffer_distance}m"):
