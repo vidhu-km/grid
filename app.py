@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression, RANSACRegressor
 import string
+import json
 
 # ==========================================================
 # Page config & Constants
@@ -29,7 +30,7 @@ COLOR_MAP_CLASS = {
 }
 
 WELL_COLS = ["Norm EUR", "Norm 1Y Cuml", "Norm IP90"]
-SUM_COLS = ["WF", "FOOZ"]  # columns where we sum (count) instead of IDW
+SUM_COLS = ["WF", "FOOZ"]
 SECTION_OOIP_COL = "SectionOOIP"
 SECTION_ROIP_COL = "SectionROIP"
 ALL_METRIC_COLS = WELL_COLS + SUM_COLS + [SECTION_OOIP_COL, SECTION_ROIP_COL]
@@ -110,9 +111,12 @@ def fit_trend(x, y):
 
 def classify_quadrant(prod_z, resource_z, pt, rt):
     hp, hr = prod_z >= pt, resource_z >= rt
-    if hp and hr:   return "High Prod / High Resource"
-    if not hp and hr: return "Low Prod / High Resource"
-    if hp and not hr: return "High Prod / Low Resource"
+    if hp and hr:
+        return "High Prod / High Resource"
+    if not hp and hr:
+        return "Low Prod / High Resource"
+    if hp and not hr:
+        return "High Prod / Low Resource"
     return "Low Prod / Low Resource"
 
 
@@ -139,6 +143,11 @@ def _alpha_combos(length):
     if length == 1:
         return list(string.ascii_uppercase)
     return [b + c for b in _alpha_combos(length - 1) for c in string.ascii_uppercase]
+
+
+def _coords_key(coords):
+    """Create a hashable key from coordinate list for dedup."""
+    return tuple(tuple(round(c, 6) for c in pt) for pt in coords)
 
 
 # ==========================================================
@@ -225,26 +234,58 @@ LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": me
 # ==========================================================
 # Sidebar
 # ==========================================================
-st.sidebar.title("Map Settings")
+st.sidebar.title("Settings")
 
-st.sidebar.markdown("---")
 buffer_distance = st.sidebar.slider("Buffer Distance (m)", 100, 2000, DEFAULT_BUFFER_M, step=50)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🗺️ Section Grid Gradient")
-section_gradient = st.sidebar.selectbox("Colour sections by", ["None"] + SEC_NUMERIC_COLS)
+section_gradient = st.sidebar.selectbox("Section Grid Colour", ["None"] + SEC_NUMERIC_COLS)
 
 show_layers = {
-    "Infill": st.sidebar.checkbox("Show Unit Infills", value=True),
-    "Lease Line": st.sidebar.checkbox("Show Unit Lease Lines", value=True),
-    "Merged": st.sidebar.checkbox("Show Mosaic Merged Inventory", value=True),
+    "Infill": st.sidebar.checkbox("Unit Infills", value=True),
+    "Lease Line": st.sidebar.checkbox("Unit Lease Lines", value=True),
+    "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
 }
 
 # ==========================================================
 # Session state for drawn wells
 # ==========================================================
 if "drawn_wells" not in st.session_state:
-    st.session_state.drawn_wells = []
+    st.session_state.drawn_wells = []  # list of {"coords": [...], "label": str}
+if "drawn_coords_set" not in st.session_state:
+    st.session_state.drawn_coords_set = set()  # for fast dedup
+
+# ==========================================================
+# Custom well management UI (sidebar)
+# ==========================================================
+st.sidebar.markdown("---")
+st.sidebar.subheader("✏️ Custom Wells")
+st.sidebar.caption("Draw a line on the map (heel → toe), then it appears here.")
+
+if st.session_state.drawn_wells:
+    for i, cw in enumerate(st.session_state.drawn_wells):
+        col_lbl, col_del = st.sidebar.columns([3, 1])
+        with col_lbl:
+            new_label = st.text_input(
+                f"Well {i+1} label",
+                value=cw.get("label") or f"Custom-{i+1}",
+                key=f"cw_label_{i}",
+                label_visibility="collapsed",
+            )
+            st.session_state.drawn_wells[i]["label"] = new_label
+        with col_del:
+            if st.button("🗑️", key=f"cw_del_{i}"):
+                key = _coords_key(cw["coords"])
+                st.session_state.drawn_coords_set.discard(key)
+                st.session_state.drawn_wells.pop(i)
+                st.rerun()
+
+    if st.sidebar.button("🗑️ Clear All Custom Wells"):
+        st.session_state.drawn_wells.clear()
+        st.session_state.drawn_coords_set.clear()
+        st.rerun()
+else:
+    st.sidebar.info("No custom wells yet. Draw on the map!")
 
 # ==========================================================
 # Build prospect set
@@ -263,16 +304,18 @@ if st.session_state.drawn_wells:
     custom_rows = []
     for i, cw in enumerate(st.session_state.drawn_wells):
         coords_proj = [tf_to_proj.transform(lon, lat) for lon, lat in cw["coords"]]
-        line = LineString(coords_proj)
-        lbl = cw.get("label") or f"Custom-{i+1}"
-        custom_rows.append({
-            "geometry": line,
-            "_prospect_type": "Custom",
-            "_is_custom": True,
-            "Label": lbl,
-        })
-    custom_gdf = gpd.GeoDataFrame(custom_rows, crs="EPSG:26913")
-    prospect_frames.append(custom_gdf)
+        if len(coords_proj) >= 2:
+            line = LineString(coords_proj)
+            lbl = cw.get("label") or f"Custom-{i+1}"
+            custom_rows.append({
+                "geometry": line,
+                "_prospect_type": "Custom",
+                "_is_custom": True,
+                "Label": lbl,
+            })
+    if custom_rows:
+        custom_gdf = gpd.GeoDataFrame(custom_rows, crs="EPSG:26913")
+        prospect_frames.append(custom_gdf)
 
 if not prospect_frames:
     st.error("Enable at least one prospect layer.")
@@ -296,7 +339,6 @@ if "Label" not in prospects.columns:
     prospects["Label"] = np.nan
 prospects["_label_is_section"] = False
 
-# For non-custom rows, try UWI first
 if "UWI" in prospects.columns:
     non_custom_mask = ~custom_mask_label
     uwi_vals = prospects.loc[non_custom_mask, "UWI"].astype(str).str.strip().replace({"": np.nan, "nan": np.nan})
@@ -357,7 +399,6 @@ def idw_for_column(hits, col, pros_index):
 
 
 def sum_for_column(hits, col, pros_index):
-    """Sum a binary/count column across wells in each prospect's buffer."""
     valid = hits.loc[hits[col].notna()]
     if valid.empty:
         return pd.Series(0, index=pros_index)
@@ -373,12 +414,10 @@ def analyze_prospects(pros, prox, sections, buffer_m):
         {"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs,
     )
 
-    # Well-to-buffer spatial join
     midpt_gdf = prox[prox["_midpoint"].notna()].copy()
     midpt_gdf = midpt_gdf.set_geometry(gpd.GeoSeries(midpt_gdf["_midpoint"], crs=prox.crs))
     well_hits = gpd.sjoin(midpt_gdf, buffer_gdf, how="inner", predicate="within")
 
-    # Vectorized distance calc
     px_mp = well_hits["index_right"].map(pros["_midpoint"])
     hit_x = well_hits["_midpoint"].apply(lambda pt: pt.x)
     hit_y = well_hits["_midpoint"].apply(lambda pt: pt.y)
@@ -387,7 +426,6 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     well_hits["_dist"] = np.sqrt((hit_x - px_x)**2 + (hit_y - px_y)**2).replace(0, 1.0)
     well_hits["_w"] = 1.0 / (well_hits["_dist"] ** 2)
 
-    # IDW for production metrics
     idw_results = {col: idw_for_column(well_hits, col, pros.index) for col in WELL_COLS}
 
     proximal_count = well_hits.groupby("index_right").size().reindex(pros.index, fill_value=0)
@@ -397,7 +435,6 @@ def analyze_prospects(pros, prox, sections, buffer_m):
         .reindex(pros.index, fill_value="")
     )
 
-    # SUM for WF and FOOZ (count of wells with flag=1 in the buffer)
     sum_results = {}
     for sc in SUM_COLS:
         if sc in prox.columns:
@@ -410,7 +447,6 @@ def analyze_prospects(pros, prox, sections, buffer_m):
         else:
             sum_results[sc] = pd.Series(0, index=pros.index)
 
-    # Section OOIP/ROIP
     sec_join = gpd.sjoin(
         sections[["geometry", SECTION_OOIP_COL, SECTION_ROIP_COL]],
         buffer_gdf, how="inner", predicate="intersects",
@@ -439,7 +475,7 @@ for col in ALL_METRIC_COLS:
     if col in prospects.columns:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
-# Coordinates — BH (endpoint) and Heel (startpoint)
+# Coordinates
 _tf = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 
 _endpoints = prospects.geometry.apply(endpoint_of_geom)
@@ -470,9 +506,8 @@ prospects["Heel Longitude"] = np.round(_lon_heel, 6)
 # Classification
 # ==========================================================
 st.sidebar.markdown("---")
-st.sidebar.subheader("📐 Classification Settings")
+st.sidebar.subheader("📐 Classification")
 
-st.sidebar.markdown("**Productivity weights (must sum to 100):**")
 cw_eur = st.sidebar.number_input("EUR weight %", 0, 100, 34, key="cw_eur")
 cw_1y = st.sidebar.number_input("1Y weight %", 0, 100, 33, key="cw_1y")
 cw_ip90 = st.sidebar.number_input("IP90 weight %", 0, 100, 33, key="cw_ip90")
@@ -486,15 +521,8 @@ field = pd.DataFrame()
 if cw_sum != 100:
     st.sidebar.error(f"Weights sum to {cw_sum}%, must be 100%")
 else:
-    st.sidebar.success(f"Weights: EUR {cw_eur}%, 1Y {cw_1y}%, IP90 {cw_ip90}%")
-
-    st.sidebar.markdown("**Quadrant thresholds:**")
-    prod_threshold = st.sidebar.slider(
-        "Productivity Z threshold (σ)", -1.0, 2.0, 0.0, 0.05, key="prod_thresh",
-    )
-    resource_threshold = st.sidebar.slider(
-        "Resource Z threshold (σ)", -1.0, 2.0, 0.0, 0.05, key="res_thresh",
-    )
+    prod_threshold = st.sidebar.slider("Productivity Z threshold (σ)", -1.0, 2.0, 0.0, 0.05, key="prod_thresh")
+    resource_threshold = st.sidebar.slider("Resource Z threshold (σ)", -1.0, 2.0, 0.0, 0.05, key="res_thresh")
 
     field = well_df.dropna(subset=[SECTION_ROIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90"]).copy()
     field = field[field[SECTION_ROIP_COL] > 0]
@@ -550,18 +578,12 @@ else:
                     prospects.loc[pros_cls.index, col] = pros_cls[col]
 
                 classification_ready = True
-            else:
-                st.sidebar.warning("No prospects with valid data for classification.")
-        else:
-            st.sidebar.warning("Could not fit trend lines (insufficient data).")
-    else:
-        st.sidebar.warning(f"Only {len(field)} UWIs with complete data — need ≥ 2.")
 
 # ==========================================================
 # Filters
 # ==========================================================
 st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 Prospect Filters")
+st.sidebar.subheader("🔍 Filters")
 
 p = prospects
 has_proximal = p["Proximal_Count"] > 0
@@ -582,13 +604,6 @@ p["_no_proximal"] = ~has_proximal
 n_total, n_passing = len(p), int(filter_mask.sum())
 n_no_proximal = int((~has_proximal).sum())
 n_custom = int(p["_is_custom"].sum())
-
-st.sidebar.markdown(
-    f"**{n_passing}** / {n_total} prospects pass filters "
-    f"({n_passing / max(n_total, 1) * 100:.0f}%)"
-)
-if n_no_proximal:
-    st.sidebar.warning(f"⚠️ {n_no_proximal} prospects have no nearby proximal wells")
 
 # ==========================================================
 # Prepare display data
@@ -635,7 +650,6 @@ if has_classification:
 else:
     p["_line_color"] = "red"
 
-# Custom wells without classification get magenta
 custom_no_cls = p["_is_custom"] & (~p["Classification"].notna() if "Classification" in p.columns else True)
 p.loc[custom_no_cls, "_line_color"] = "#ff00ff"
 
@@ -657,19 +671,17 @@ p_lines_4326 = gpd.GeoDataFrame({
 }, crs=p.crs).to_crs(4326)
 
 # ==========================================================
-# Executive summary
+# Title
 # ==========================================================
 st.title("🛢️ Inventory Classifier")
-summary_parts = [
-    f"**{n_passing}** of {n_total} prospects pass filters "
-    f"({n_passing / max(n_total, 1) * 100:.0f}%). Buffer: {buffer_distance}m."
-]
-if n_custom:
-    summary_parts.append(f"✏️ **{n_custom}** custom well(s) included.")
-st.info(" ".join(summary_parts))
+st.caption(
+    f"**{n_passing}** / {n_total} prospects pass filters · "
+    f"Buffer: {buffer_distance}m"
+    + (f" · ✏️ {n_custom} custom well(s)" if n_custom else "")
+)
 
 # ==========================================================
-# MAP — with Draw plugin on main map
+# MAP
 # ==========================================================
 bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
@@ -682,6 +694,7 @@ MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 # Draw plugin — polyline only
 Draw(
     export=False,
+    position="topleft",
     draw_options={
         "polyline": {
             "shapeOptions": {"color": "#ff00ff", "weight": 4, "opacity": 0.9},
@@ -696,7 +709,7 @@ Draw(
     edit_options={"edit": False, "remove": True},
 ).add_to(m)
 
-# ── Layer 1: Bakken Land ──
+# ── Bakken Land ──
 land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
 folium.GeoJson(
     land_json,
@@ -704,7 +717,7 @@ folium.GeoJson(
 ).add_to(land_fg)
 land_fg.add_to(m)
 
-# ── Layer 2: Units ──
+# ── Units ──
 units_fg = folium.FeatureGroup(name="Units", show=True)
 folium.GeoJson(
     units_json,
@@ -712,7 +725,7 @@ folium.GeoJson(
 ).add_to(units_fg)
 units_fg.add_to(m)
 
-# ── Layer 3: Section Grid ──
+# ── Section Grid ──
 if section_gradient != "None" and section_gradient in section_4326.columns:
     grad_vals = section_4326[section_gradient].dropna()
     if not grad_vals.empty:
@@ -747,7 +760,7 @@ folium.GeoJson(
 ).add_to(section_fg)
 section_fg.add_to(m)
 
-# ── Layer 4: Existing Wells ──
+# ── Existing Wells ──
 well_fg = folium.FeatureGroup(name="Existing Wells")
 line_wells = existing_display[existing_display.geometry.type != "Point"]
 point_wells = existing_display[existing_display.geometry.type == "Point"]
@@ -793,7 +806,7 @@ for _, row in point_wells.iterrows():
     ).add_to(well_fg)
 well_fg.add_to(m)
 
-# ── Layer 5: Prospect Buffers ──
+# ── Prospect Buffers ──
 buffer_fg = folium.FeatureGroup(name="Prospect Buffers")
 
 buffer_gdf["_bstyle"] = "fail"
@@ -814,14 +827,13 @@ folium.GeoJson(
 ).add_to(buffer_fg)
 buffer_fg.add_to(m)
 
-# ── Layer 6: Prospect Wells ──
+# ── Prospect Wells ──
 prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
 
 for idx, row in p_lines_4326.iterrows():
     lc = row["_line_color"]
     tip = row["_tooltip"]
     is_custom = row.get("_is_custom", False)
-
     line_weight = 5 if is_custom else 3
 
     folium.GeoJson(
@@ -856,76 +868,81 @@ for idx, row in p_lines_4326.iterrows():
 
 prospect_fg.add_to(m)
 
+# ── Add already-drawn custom wells back onto the map so they persist visually ──
+if st.session_state.drawn_wells:
+    for cw in st.session_state.drawn_wells:
+        coords_latlon = [(lat, lon) for lon, lat in cw["coords"]]
+        folium.PolyLine(
+            coords_latlon,
+            color="#ff00ff", weight=4, opacity=0.9, dash_array="8 4",
+        ).add_to(prospect_fg)
+
 folium.LayerControl(collapsed=True).add_to(m)
 
-# Render map and capture drawn features
-map_result = st_folium(m, use_container_width=True, height=900, returned_objects=["all_drawings"])
+# Render map — capture last_active_drawing for new draws
+map_result = st_folium(
+    m,
+    use_container_width=True,
+    height=800,
+    returned_objects=["last_active_drawing"],
+)
 
 # ==========================================================
-# Process drawings from the map
+# Process new drawing from the map
 # ==========================================================
-st.markdown("---")
-
-new_drawings_found = False
-if map_result and map_result.get("all_drawings"):
-    for drawing in map_result["all_drawings"]:
-        geom = drawing.get("geometry", {})
-        if geom.get("type") == "LineString":
-            coords = geom.get("coordinates", [])
-            if len(coords) >= 2:
-                # Use only first and last point (2 endpoints)
-                coord_pair = [(coords[0][0], coords[0][1]), (coords[-1][0], coords[-1][1])]
-                # Dedup check
-                is_dup = False
-                for existing in st.session_state.drawn_wells:
-                    if existing["coords"] == coord_pair:
-                        is_dup = True
-                        break
-                if not is_dup:
-                    st.session_state.drawn_wells.append({
-                        "coords": coord_pair,
-                        "label": None,
-                    })
-                    new_drawings_found = True
-
+if map_result and map_result.get("last_active_drawing"):
+    drawing = map_result["last_active_drawing"]
+    geom = drawing.get("geometry", {})
+    if geom.get("type") == "LineString":
+        coords = geom.get("coordinates", [])
+        if len(coords) >= 2:
+            # Keep all drawn vertices (heel to toe)
+            coord_list = [(c[0], c[1]) for c in coords]
+            key = _coords_key(coord_list)
+            if key not in st.session_state.drawn_coords_set:
+                st.session_state.drawn_coords_set.add(key)
+                st.session_state.drawn_wells.append({
+                    "coords": coord_list,
+                    "label": None,
+                })
+                st.rerun()
 
 # ==========================================================
-# Custom Well Results Card
+# Custom Well Results
 # ==========================================================
 custom_prospects = p[p["_is_custom"]].copy()
 if not custom_prospects.empty:
     st.markdown("---")
-    st.header("✏️ Custom Well Classification Results")
+    st.subheader("✏️ Custom Well Results")
 
     for _, cw_row in custom_prospects.iterrows():
         label = cw_row.get("Label", "Custom Well")
         cls = cw_row.get("Classification", None)
-        cls_str = cls if pd.notna(cls) else "Not classified (insufficient proximal data)"
+        cls_str = cls if pd.notna(cls) else "Unclassified"
         cls_color = COLOR_MAP_CLASS.get(cls, "#888") if pd.notna(cls) else "#888"
 
         with st.expander(f"**{label}** — {cls_str}", expanded=True):
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.markdown("**Location**")
-                st.markdown(f"Heel: `{cw_row.get('Heel Latitude', '—')}`, `{cw_row.get('Heel Longitude', '—')}`")
-                st.markdown(f"Toe (BH): `{cw_row.get('BH Latitude', '—')}`, `{cw_row.get('BH Longitude', '—')}`")
-                st.markdown(f"Proximal Wells: **{int(cw_row.get('Proximal_Count', 0))}**")
+                st.markdown(
+                    f"Heel: `{cw_row.get('Heel Latitude', '—')}, {cw_row.get('Heel Longitude', '—')}`  \n"
+                    f"Toe: `{cw_row.get('BH Latitude', '—')}, {cw_row.get('BH Longitude', '—')}`  \n"
+                    f"Proximal Wells: **{int(cw_row.get('Proximal_Count', 0))}**"
+                )
             with c2:
-                st.markdown("**Metrics**")
                 for col in ALL_METRIC_COLS:
                     val = cw_row.get(col, np.nan)
-                    prefix = "Σ " if col in SUM_COLS else "IDW "
+                    prefix = "Σ " if col in SUM_COLS else ""
                     st.markdown(f"{prefix}{col}: **{fmt_val(col, val)}**")
             with c3:
-                st.markdown("**Classification**")
                 st.markdown(
-                    f"<span style='color:{cls_color};font-size:1.3em;font-weight:bold'>"
+                    f"<span style='color:{cls_color};font-size:1.2em;font-weight:bold'>"
                     f"{cls_str}</span>", unsafe_allow_html=True
                 )
                 pz = cw_row.get("Productivity_Z", np.nan)
                 rz = cw_row.get("Resource_Z", np.nan)
                 if pd.notna(pz):
-                    st.markdown(f"Productivity Z: **{pz:.2f}σ**")
+                    st.markdown(f"Prod Z: **{pz:.2f}σ**")
                 if pd.notna(rz):
                     st.markdown(f"Resource Z: **{rz:.2f}σ**")
 
@@ -934,13 +951,12 @@ if not custom_prospects.empty:
 # ==========================================================
 if classification_ready and "Classification" in p.columns:
     st.markdown("---")
-    st.header("📐 Classification Results — 4-Quadrant View")
+    st.header("📐 Classification — 4-Quadrant View")
 
     pros_chart = p[p["_passes_filter"] & p["Classification"].notna()]
 
     if not pros_chart.empty:
         col1, col2 = st.columns(2)
-
         x_range = np.linspace(field[SECTION_ROIP_COL].min(), field[SECTION_ROIP_COL].max(), 100)
 
         for y_col, model, target_col in [
@@ -983,7 +999,7 @@ if classification_ready and "Classification" in p.columns:
                 symbol="_symbol",
                 symbol_map={"Prospect": "circle", "Custom": "star"},
                 hover_data=["Label"],
-                title="Productivity Z vs Resource Z (4-Quadrant)",
+                title="Productivity Z vs Resource Z",
                 labels={"Resource_Z": f"Resource Z ({SECTION_ROIP_COL})",
                         "Productivity_Z": "Productivity Z (Composite)"},
             )
@@ -1019,15 +1035,7 @@ if classification_ready and "Classification" in p.columns:
 
             st.plotly_chart(fig_quad, use_container_width=True)
 
-        st.subheader("Classification/Ranking Table")
-        summary = pros_chart["Classification"].value_counts().reset_index()
-        summary.columns = ["Classification", "Count"]
-        summary["Classification"] = pd.Categorical(
-            summary["Classification"], categories=list(COLOR_MAP_CLASS.keys()), ordered=True
-        )
-        st.dataframe(summary.sort_values("Classification").reset_index(drop=True),
-                      use_container_width=True)
-
+        # Table
         table_cols = [
             "Label", "_is_custom",
             "Heel Latitude", "Heel Longitude", "BH Latitude", "BH Longitude",
@@ -1036,7 +1044,6 @@ if classification_ready and "Classification" in p.columns:
         ] + SUM_COLS + [
             "Z_EUR", "Z_IP90", "Z_1Y", "Productivity_Z", "Resource_Z", "Classification"
         ]
-        # Only include columns that exist
         table_cols = [c for c in table_cols if c in pros_chart.columns]
 
         cls_display = pros_chart[table_cols].sort_values(
@@ -1045,24 +1052,20 @@ if classification_ready and "Classification" in p.columns:
         cls_display.rename(columns={"_is_custom": "Custom Well"}, inplace=True)
         st.dataframe(cls_display, use_container_width=True)
         st.download_button(
-            "📥 Download Classified Prospects",
+            "📥 Download CSV",
             data=cls_display.to_csv(index=False),
             file_name="classified_prospects.csv", mime="text/csv",
         )
-    else:
-        st.warning("No prospects with complete data for classification charts.")
 
 # No-proximal table
 no_prox = p[p["_no_proximal"]]
 if not no_prox.empty:
-    st.markdown("---")
-    st.subheader("⚠️ No Proximal Wells Found")
-    st.caption(f"{len(no_prox)} prospects have no proximal wells within {buffer_distance}m.")
-    st.dataframe(
-        no_prox[["Label", "_prospect_type", "_is_custom",
-                 "Heel Latitude", "Heel Longitude",
-                 "BH Latitude", "BH Longitude"]].rename(
-            columns={"_prospect_type": "Type", "_is_custom": "Custom Well"}
-        ).reset_index(drop=True),
-        use_container_width=True,
-    )
+    with st.expander(f"⚠️ {len(no_prox)} prospects with no proximal wells within {buffer_distance}m"):
+        st.dataframe(
+            no_prox[["Label", "_prospect_type", "_is_custom",
+                     "Heel Latitude", "Heel Longitude",
+                     "BH Latitude", "BH Longitude"]].rename(
+                columns={"_prospect_type": "Type", "_is_custom": "Custom Well"}
+            ).reset_index(drop=True),
+            use_container_width=True,
+        )
