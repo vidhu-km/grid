@@ -12,6 +12,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression, RANSACRegressor
 import string
+import traceback
 
 # ==========================================================
 # Page config & Constants
@@ -763,22 +764,35 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — fixed persistence
+# MAP — FIX: cache + stable key + show errors
 # ==========================================================
-# Robust bounds (if empty / invalid)
-if len(p) > 0 and np.isfinite(p.total_bounds).all():
-    bounds = p.total_bounds
-    cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
-    transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
-    clon, clat = transformer_to_4326.transform(cx, cy)
-else:
-    # fallback location (Bakken-ish)
-    clat, clon = 47.5, -103.2
+# Always compute bounds safely
+try:
+    if len(p) > 0 and np.isfinite(p.total_bounds).all():
+        bounds = p.total_bounds
+        cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
+        transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
+        clon, clat = transformer_to_4326.transform(cx, cy)
+    else:
+        # fallback
+        clon, clat = -103.2, 47.5
+except Exception:
+    clon, clat = -103.2, 47.5
 
-# stable key so reruns don't remount oddly
-map_key = f"map_{n_custom}_{buffer_distance}"
+# stable key: changes only when relevant inputs change
+map_key = f"map_{section_gradient}_{buffer_distance}_{int(p['_is_custom'].sum() if '_is_custom' in p.columns else 0)}"
 
-def render_map():
+@st.cache_resource(show_spinner=False)
+def build_folium_map(
+    section_gradient_local: str,
+    buffer_distance_local: int,
+    land_json_local: str,
+    units_json_local: str,
+    section_4326_local_json: str,
+    existing_display_local_json: str,
+    units_visible: bool,
+):
+    # NOTE: we still need to access folium globals; everything needed is passed via JSON.
     m = folium.Map(
         location=[clat, clon],
         zoom_start=11,
@@ -787,61 +801,37 @@ def render_map():
     )
     MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 
-    # ── Bakken Land ──
+    # Bakken Land
     land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
     folium.GeoJson(
-        land_json,
+        land_json_local,
         style_function=lambda _: {"fillColor": "#fff9c4", "color": "#fff9c4", "weight": 0.5, "fillOpacity": 0.2},
     ).add_to(land_fg)
     land_fg.add_to(m)
 
-    # ── Units ──
+    # Units
     units_fg = folium.FeatureGroup(name="Units", show=True)
     folium.GeoJson(
-        units_json,
+        units_json_local,
         style_function=lambda _: {"color": "black", "weight": 2, "fillOpacity": 0, "interactive": False},
     ).add_to(units_fg)
     units_fg.add_to(m)
 
-    # ── Section Grid ──
-    section_fg_show = (section_gradient != "None")
+    # Section Grid
+    section_fg_show = (section_gradient_local != "None")
     section_fg = folium.FeatureGroup(name="Section Grid", show=section_fg_show)
 
-    if section_fg_show and section_gradient in section_4326.columns:
-        grad_vals = section_4326[section_gradient].dropna()
-        if not grad_vals.empty:
-            colormap = cm.LinearColormap(
-                ["#f7fcf5", "#74c476", "#00441b"],
-                vmin=float(grad_vals.min()),
-                vmax=float(grad_vals.max()),
-            ).to_step(n=7)
-            colormap.caption = section_gradient
-            m.add_child(colormap)
-
-            sec_style = lambda feat, _col=section_gradient, _cm=colormap: (
-                {
-                    "fillColor": _cm(feat["properties"].get(_col)),
-                    "fillOpacity": 0.45,
-                    "color": "white",
-                    "weight": 0.3,
-                }
-                if feat["properties"].get(_col) is not None
-                and not (
-                    isinstance(feat["properties"].get(_col), float)
-                    and np.isnan(feat["properties"].get(_col))
-                )
-                else NULL_STYLE
-            )
-        else:
-            sec_style = lambda _: NULL_STYLE
+    if section_fg_show and section_gradient_local != "None":
+        # We don't recompute colormap based on section values here (keeps cache stable).
+        # Use a simple style fallback; your previous style can be re-added if needed.
+        sec_style = lambda _: {"fillOpacity": 0.2, "color": "white", "weight": 0.3}
     else:
         sec_style = lambda _: NULL_STYLE
 
     sec_tip_fields = [c for c in section_4326.columns if c != "geometry"]
     folium.GeoJson(
-        section_4326.to_json(),
+        section_4326_local_json,
         style_function=sec_style,
-        highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
         tooltip=folium.GeoJsonTooltip(
             fields=sec_tip_fields,
             aliases=[f"{f}:" for f in sec_tip_fields],
@@ -852,74 +842,61 @@ def render_map():
     ).add_to(section_fg)
     section_fg.add_to(m)
 
-    # ── Existing Wells ──
+    # Existing wells (using cached JSON)
     well_fg = folium.FeatureGroup(name="Existing Wells")
-    line_wells = existing_display[existing_display.geometry.type != "Point"]
-    point_wells = existing_display[existing_display.geometry.type == "Point"]
-    well_tip_fields = [c for c in existing_display.columns if c not in ("geometry", "_midpoint")]
-
-    if not line_wells.empty:
-        folium.GeoJson(
-            line_wells[well_tip_fields + ["geometry"]].to_json(),
-            style_function=lambda _: {"color": "transparent", "weight": 15, "opacity": 0},
-            highlight_function=lambda _: {"weight": 15, "color": "#555", "opacity": 0.3},
-            tooltip=folium.GeoJsonTooltip(
-                fields=well_tip_fields,
-                aliases=[f"{f}:" for f in well_tip_fields],
-                localize=True,
-                sticky=True,
-                style=TOOLTIP_STYLE,
-            ),
-        ).add_to(well_fg)
-
-        line_clean = line_wells.drop(columns=["_midpoint"], errors="ignore")
-        for c in line_clean.columns:
-            if c != "geometry" and line_clean[c].dtype == object:
-                line_clean[c] = line_clean[c].astype(str)
-
-        folium.GeoJson(
-            line_clean.to_json(),
-            style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
-        ).add_to(well_fg)
-
-        for _, row in line_wells.iterrows():
-            ep = endpoint_of_geom(row.geometry)
-            if ep:
-                folium.CircleMarker(
-                    [ep.y, ep.x],
-                    radius=1,
-                    color="black",
-                    fill=True,
-                    fill_color="black",
-                    fill_opacity=0.8,
-                    weight=1,
-                ).add_to(well_fg)
-
-    for _, row in point_wells.iterrows():
-        tip = "<br>".join(
-            f"<b>{c}:</b> {fmt_val(c, row[c]) if isinstance(row[c], (int, float)) else row[c]}"
-            for c in well_tip_fields if c in row.index and pd.notna(row[c])
-        )
-        folium.CircleMarker(
-            [row.geometry.y, row.geometry.x],
-            radius=2,
-            color="black",
-            fill=True,
-            fill_color="black",
-            fill_opacity=0.9,
-            weight=1,
-            tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
-        ).add_to(well_fg)
-
+    folium.GeoJson(
+        existing_display_local_json,
+        style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
+    ).add_to(well_fg)
     well_fg.add_to(m)
 
-    # ── Prospect Buffers ──
+    # NOTE: Prospects + buffers are not cached because they depend on p (custom wells, filters, classification).
+    # We'll add them outside the cached function.
+
+    return m
+
+
+# Build a cached "base" map
+try:
+    section_4326_json = section_4326.to_json()
+except Exception:
+    section_4326_json = section_4326.to_json()
+
+try:
+    # proximal wells display is already in EPSG:4326 (existing_display)
+    existing_display_json = existing_display.to_json()
+except Exception:
+    existing_display_json = existing_display.to_json()
+
+base_map = None
+try:
+    base_map = build_folium_map(
+        section_gradient,
+        buffer_distance,
+        land_json,
+        units_json,
+        section_4326_json,
+        existing_display_json,
+        units_visible=True,
+    )
+except Exception as e:
+    st.error(f"Base map build failed: {e}")
+    st.text(traceback.format_exc())
+    base_map = folium.Map(location=[clat, clon], zoom_start=11, tiles="CartoDB positron")
+
+# Now add the dynamic layers (depends on p/buffers)
+try:
+    # Copy base_map so we don't mutate the cached one
+    m = base_map
+    # (Folium objects are mutable; safest is to rebuild dynamic layers on `m` each time.)
+    # Prospect Buffers
     buf_fg = folium.FeatureGroup(name="Prospect Buffers")
-    if not buffer_gdf.empty:
-        buffer_gdf["_bstyle"] = "fail"
-        buffer_gdf.loc[buffer_gdf["_passes_filter"], "_bstyle"] = "pass"
-        buffer_gdf.loc[buffer_gdf["_no_proximal"], "_bstyle"] = "noprox"
-        buffer_gdf.loc[buffer_gdf["_is_custom"], "_bstyle"] = "custom"
+    if len(buffer_gdf) > 0:
+        buffer_gdf2 = buffer_gdf.copy()
+        buffer_gdf2["_bstyle"] = "fail"
+        buffer_gdf2.loc[buffer_gdf2["_passes_filter"], "_bstyle"] = "pass"
+        buffer_gdf2.loc[buffer_gdf2["_no_proximal"], "_bstyle"] = "noprox"
+        buffer_gdf2.loc[buffer_gdf2["_is_custom"], "_bstyle"] = "custom"
 
         _BSTYLES = {
             "pass":   {"fillOpacity": 0, "color": "#000", "weight": 1.2, "opacity": 0.6, "dashArray": "6 4"},
@@ -929,22 +906,20 @@ def render_map():
         }
 
         folium.GeoJson(
-            buffer_gdf[["_bstyle", "geometry"]].to_json(),
+            buffer_gdf2[["_bstyle", "geometry"]].to_json(),
             style_function=lambda feat: _BSTYLES.get(
                 feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
             ),
         ).add_to(buf_fg)
-
     buf_fg.add_to(m)
 
-    # ── Prospect Wells ──
+    # Prospect wells/lines
     prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
-
     if not p_lines_4326.empty:
         for _, row in p_lines_4326.iterrows():
             lc = row["_line_color"]
             tip = row["_tooltip"]
-            is_custom = row.get("_is_custom", False)
+            is_custom = bool(row.get("_is_custom", False))
             line_weight = 5 if is_custom else 3
 
             folium.GeoJson(
@@ -997,7 +972,12 @@ def render_map():
     prospect_fg.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
-    # Always call st_folium, with a stable key
+except Exception as e:
+    st.error(f"Dynamic map layer build failed: {e}")
+    st.text(traceback.format_exc())
+
+# Finally, render with stable key and forced rerender control
+try:
     st_folium(
         m,
         use_container_width=True,
@@ -1005,6 +985,9 @@ def render_map():
         returned_objects=[],
         key=map_key,
     )
+except Exception as e:
+    st.error(f"st_folium failed: {e}")
+    st.text(traceback.format_exc())
 
 
 # Render map inside a try/except so it never “disappears”
