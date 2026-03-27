@@ -164,10 +164,6 @@ def parse_coord_line(line: str):
 
 
 def parse_wells_from_text(text: str):
-    """
-    Multiple wells separated by blank lines.
-    Each well: >=2 lines of "lon,lat".
-    """
     wells = []
     current = []
     for raw in text.splitlines():
@@ -183,7 +179,6 @@ def parse_wells_from_text(text: str):
         current.append(parsed)
     if current:
         wells.append(current)
-
     wells = [w for w in wells if len(w) >= 2]
     return wells
 
@@ -764,7 +759,7 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — FIX: cache + stable key + show errors
+# MAP — FIX for “Point is not JSON serializable”
 # ==========================================================
 # Always compute bounds safely
 try:
@@ -774,25 +769,20 @@ try:
         transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
         clon, clat = transformer_to_4326.transform(cx, cy)
     else:
-        # fallback
         clon, clat = -103.2, 47.5
 except Exception:
     clon, clat = -103.2, 47.5
 
-# stable key: changes only when relevant inputs change
 map_key = f"map_{section_gradient}_{buffer_distance}_{int(p['_is_custom'].sum() if '_is_custom' in p.columns else 0)}"
 
 @st.cache_resource(show_spinner=False)
-def build_folium_map(
+def build_folium_map_base(
     section_gradient_local: str,
-    buffer_distance_local: int,
     land_json_local: str,
     units_json_local: str,
     section_4326_local_json: str,
     existing_display_local_json: str,
-    units_visible: bool,
 ):
-    # NOTE: we still need to access folium globals; everything needed is passed via JSON.
     m = folium.Map(
         location=[clat, clon],
         zoom_start=11,
@@ -817,17 +807,15 @@ def build_folium_map(
     ).add_to(units_fg)
     units_fg.add_to(m)
 
-    # Section Grid
+    # Section Grid (keep same as your intent, but without JSON-unsafe data)
     section_fg_show = (section_gradient_local != "None")
     section_fg = folium.FeatureGroup(name="Section Grid", show=section_fg_show)
 
-    if section_fg_show and section_gradient_local != "None":
-        # We don't recompute colormap based on section values here (keeps cache stable).
-        # Use a simple style fallback; your previous style can be re-added if needed.
+    sec_style = lambda _: NULL_STYLE
+    if section_fg_show:
         sec_style = lambda _: {"fillOpacity": 0.2, "color": "white", "weight": 0.3}
-    else:
-        sec_style = lambda _: NULL_STYLE
 
+    # Tip fields
     sec_tip_fields = [c for c in section_4326.columns if c != "geometry"]
     folium.GeoJson(
         section_4326_local_json,
@@ -842,7 +830,7 @@ def build_folium_map(
     ).add_to(section_fg)
     section_fg.add_to(m)
 
-    # Existing wells (using cached JSON)
+    # Existing wells
     well_fg = folium.FeatureGroup(name="Existing Wells")
     folium.GeoJson(
         existing_display_local_json,
@@ -850,45 +838,30 @@ def build_folium_map(
     ).add_to(well_fg)
     well_fg.add_to(m)
 
-    # NOTE: Prospects + buffers are not cached because they depend on p (custom wells, filters, classification).
-    # We'll add them outside the cached function.
-
+    folium.LayerControl(collapsed=True).add_to(m)
     return m
 
-
-# Build a cached "base" map
-try:
-    section_4326_json = section_4326.to_json()
-except Exception:
-    section_4326_json = section_4326.to_json()
-
-try:
-    # proximal wells display is already in EPSG:4326 (existing_display)
-    existing_display_json = existing_display.to_json()
-except Exception:
-    existing_display_json = existing_display.to_json()
+# Build base JSON once
+section_4326_json = section_4326.to_json()
+existing_display_json = existing_display.to_json()
 
 base_map = None
 try:
-    base_map = build_folium_map(
+    base_map = build_folium_map_base(
         section_gradient,
-        buffer_distance,
         land_json,
         units_json,
         section_4326_json,
         existing_display_json,
-        units_visible=True,
     )
 except Exception as e:
     st.error(f"Base map build failed: {e}")
     st.text(traceback.format_exc())
     base_map = folium.Map(location=[clat, clon], zoom_start=11, tiles="CartoDB positron")
 
-# Now add the dynamic layers (depends on p/buffers)
+# Dynamic layers: prospect buffers + prospect wells
+m = base_map
 try:
-    # Copy base_map so we don't mutate the cached one
-    m = base_map
-    # (Folium objects are mutable; safest is to rebuild dynamic layers on `m` each time.)
     # Prospect Buffers
     buf_fg = folium.FeatureGroup(name="Prospect Buffers")
     if len(buffer_gdf) > 0:
@@ -911,72 +884,85 @@ try:
                 feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
             ),
         ).add_to(buf_fg)
+
     buf_fg.add_to(m)
 
-    # Prospect wells/lines
+    # Prospect Wells (THIS is the fix)
+    # We avoid row.geometry.__geo_interface__ and instead use GeoPandas to_json()
+    # with JSON-safe properties only.
     prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
+
     if not p_lines_4326.empty:
+        g = p_lines_4326.copy()
+
+        g["tooltip"] = g["_tooltip"].astype(str)
+        g["line_color"] = g["_line_color"].astype(str)
+        g["is_custom"] = g["_is_custom"].fillna(False).astype(bool)
+
+        # Keep only primitive properties + geometry (geometry handled by to_json())
+        g = g[["tooltip", "line_color", "is_custom", "geometry"]]
+
+        gj_json = g.to_json()
+
+        def style_function(feat):
+            lc = feat["properties"].get("line_color", "red")
+            is_custom = feat["properties"].get("is_custom", False)
+            w = 5 if is_custom else 3
+            return {"color": lc, "weight": w, "opacity": 0.9}
+
+        folium.GeoJson(
+            gj_json,
+            style_function=style_function,
+            highlight_function=lambda _: {"weight": 7, "color": "#ff4444"},
+            tooltip=folium.GeoJsonTooltip(
+                fields=["tooltip"],
+                aliases=[""],
+                localize=False,
+                sticky=True,
+                style="font-size:12px",
+            ),
+        ).add_to(prospect_fg)
+
+        # Add custom heel/toe markers (numeric coords only)
         for _, row in p_lines_4326.iterrows():
+            if not bool(row.get("_is_custom", False)):
+                continue
             lc = row["_line_color"]
-            tip = row["_tooltip"]
-            is_custom = bool(row.get("_is_custom", False))
-            line_weight = 5 if is_custom else 3
+            tip = str(row["_tooltip"])
+            coords = list(row.geometry.coords) if row.geometry is not None else []
+            if len(coords) >= 2:
+                folium.RegularPolygonMarker(
+                    [coords[0][1], coords[0][0]],
+                    number_of_sides=4,
+                    radius=6,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=2,
+                    rotation=45,
+                    tooltip=folium.Tooltip(f"✏️ Heel<br>{tip}", sticky=True, style="font-size:12px"),
+                ).add_to(prospect_fg)
 
-            folium.GeoJson(
-                row.geometry.__geo_interface__,
-                style_function=lambda _, _lc=lc, _w=line_weight: {"color": _lc, "weight": _w, "opacity": 0.9},
-                highlight_function=lambda _: {"weight": 7, "color": "#ff4444"},
-                tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
-            ).add_to(prospect_fg)
-
-            if is_custom:
-                coords = list(row.geometry.coords)
-                if len(coords) >= 2:
-                    folium.RegularPolygonMarker(
-                        [coords[0][1], coords[0][0]],
-                        number_of_sides=4,
-                        radius=6,
-                        color=lc,
-                        fill=True,
-                        fill_color=lc,
-                        fill_opacity=0.9,
-                        weight=2,
-                        rotation=45,
-                        tooltip=folium.Tooltip(f"✏️ Heel<br>{tip}", sticky=True, style="font-size:12px"),
-                    ).add_to(prospect_fg)
-                    folium.RegularPolygonMarker(
-                        [coords[-1][1], coords[-1][0]],
-                        number_of_sides=5,
-                        radius=8,
-                        color=lc,
-                        fill=True,
-                        fill_color=lc,
-                        fill_opacity=0.9,
-                        weight=2,
-                        tooltip=folium.Tooltip(f"✏️ Toe<br>{tip}", sticky=True, style="font-size:12px"),
-                    ).add_to(prospect_fg)
-            else:
-                ep = endpoint_of_geom(row.geometry)
-                if ep:
-                    folium.CircleMarker(
-                        [ep.y, ep.x],
-                        radius=3,
-                        color=lc,
-                        fill=True,
-                        fill_color=lc,
-                        fill_opacity=0.9,
-                        weight=1,
-                        tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
-                    ).add_to(prospect_fg)
+                folium.RegularPolygonMarker(
+                    [coords[-1][1], coords[-1][0]],
+                    number_of_sides=5,
+                    radius=8,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=2,
+                    tooltip=folium.Tooltip(f"✏️ Toe<br>{tip}", sticky=True, style="font-size:12px"),
+                ).add_to(prospect_fg)
 
     prospect_fg.add_to(m)
-    folium.LayerControl(collapsed=True).add_to(m)
 
 except Exception as e:
     st.error(f"Dynamic map layer build failed: {e}")
     st.text(traceback.format_exc())
 
-# Finally, render with stable key and forced rerender control
+# Render
 try:
     st_folium(
         m,
@@ -988,13 +974,6 @@ try:
 except Exception as e:
     st.error(f"st_folium failed: {e}")
     st.text(traceback.format_exc())
-
-
-# Render map inside a try/except so it never “disappears”
-try:
-    render_map()
-except Exception as e:
-    st.warning(f"Map rendering temporarily failed: {e}")
 
 # ==========================================================
 # Custom Well Results
