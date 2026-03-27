@@ -3,7 +3,7 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import folium
-from folium.plugins import MiniMap, Draw
+from folium.plugins import MiniMap  # Draw removed
 from streamlit_folium import st_folium
 import branca.colormap as cm
 from shapely.geometry import Point, LineString
@@ -37,7 +37,6 @@ TOOLTIP_STYLE = (
     "font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);"
     "border:1px solid #333;border-radius:3px;"
 )
-
 
 # ==========================================================
 # Helpers
@@ -100,7 +99,8 @@ def fit_trend(x, y):
         model = RANSACRegressor(
             estimator=LinearRegression(),
             min_samples=max(3, int(0.5 * len(X))),
-            residual_threshold=None, random_state=42,
+            residual_threshold=None,
+            random_state=42,
         )
         model.fit(X, Y)
         return model
@@ -147,6 +147,46 @@ def _alpha_combos(length):
 def _coords_key(coords):
     return tuple(tuple(round(c, 6) for c in pt) for pt in coords)
 
+
+# ---- New: paste parser (EPSG:4326 lon,lat) ----
+def parse_coord_line(line: str):
+    line = line.strip()
+    if not line:
+        return None
+    # Accept "lon,lat" or "lon lat"
+    line = line.replace(";", " ").replace(",", " ")
+    parts = [p for p in line.split() if p]
+    if len(parts) < 2:
+        return None
+    lon = float(parts[0])
+    lat = float(parts[1])
+    return lon, lat
+
+
+def parse_wells_from_text(text: str):
+    """
+    Multiple wells separated by blank lines.
+    Each well: >=2 lines of "lon,lat".
+    """
+    wells = []
+    current = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            if current:
+                wells.append(current)
+                current = []
+            continue
+        parsed = parse_coord_line(line)
+        if parsed is None:
+            continue
+        current.append(parsed)
+    if current:
+        wells.append(current)
+
+    # keep only wells with >=2 points
+    wells = [w for w in wells if len(w) >= 2]
+    return wells
 
 # ==========================================================
 # Load data (cached)
@@ -222,10 +262,12 @@ def load_data():
             land_json, units_json, proximal_wells)
 
 
-(lines_gdf, points_gdf, grid_gdf, units_gdf, infills_gdf, lease_lines_gdf,
- merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
- section_enriched, section_4326, units_4326, land_4326,
- land_json, units_json, proximal_wells) = load_data()
+(
+    lines_gdf, points_gdf, grid_gdf, units_gdf, infills_gdf, lease_lines_gdf,
+    merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
+    section_enriched, section_4326, units_4326, land_4326,
+    land_json, units_json, proximal_wells
+) = load_data()
 
 LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
 
@@ -255,11 +297,47 @@ show_layers = {
     "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
 }
 
-# Custom well management
+# Custom well management (now via paste box)
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
-st.sidebar.caption("Draw a line on the map, then adjust any sidebar control to classify it.")
+st.sidebar.caption("Paste lon/lat coordinates below. Each well is a polyline (>=2 points).")
 
+# ---- Paste box ----
+st.sidebar.subheader("📌 Paste Coordinates (lon,lat)")
+st.sidebar.caption(
+    "Use EPSG:4326 (WGS84). Format: `lon,lat` per line. "
+    "Blank line separates wells."
+)
+
+coords_text = st.sidebar.text_area(
+    "Pasted coords",
+    height=150,
+    placeholder=(
+        "-103.2345,48.0123\n"
+        "-103.2330,48.0130\n"
+        "\n"
+        "-103.2200,48.0200\n"
+        "-103.2150,48.0220"
+    ),
+    key="coords_text",
+)
+
+if st.sidebar.button("➕ Add to Custom Wells", type="primary"):
+    wells = parse_wells_from_text(coords_text)
+    if not wells:
+        st.sidebar.warning("No valid wells found. Need at least 2 points per well.")
+    else:
+        for wcoords in wells:
+            coord_list = [(float(lon), float(lat)) for lon, lat in wcoords]
+            key = _coords_key(coord_list)
+            if key in st.session_state.drawn_coords_set:
+                continue
+            st.session_state.drawn_coords_set.add(key)
+            st.session_state.drawn_wells.append({"coords": coord_list, "label": None})
+        st.toast("Custom well(s) added.", icon="✅")
+        st.rerun()
+
+# Edit/delete existing custom wells
 if st.session_state.drawn_wells:
     wells_to_delete = []
     for i, cw in enumerate(st.session_state.drawn_wells):
@@ -289,16 +367,7 @@ if st.session_state.drawn_wells:
         st.session_state.drawn_coords_set.clear()
         st.rerun()
 else:
-    st.sidebar.info("No custom wells drawn yet.")
-
-# Dummy widget: user clicks this after drawing to trigger a clean rerun
-# that picks up the new well. Placed in sidebar so it doesn't affect map.
-classify_clicked = st.sidebar.button(
-    "🔄 Classify Drawn Wells",
-    type="primary",
-    use_container_width=True,
-    help="After drawing on the map, click here to run classification.",
-)
+    st.sidebar.info("No custom wells added yet.")
 
 # ==========================================================
 # Build prospect set
@@ -353,9 +422,14 @@ prospects["_label_is_section"] = False
 
 if "UWI" in prospects.columns:
     non_custom_mask = ~custom_mask_label
-    uwi_vals = prospects.loc[non_custom_mask, "UWI"].astype(str).str.strip().replace({"": np.nan, "nan": np.nan})
+    uwi_vals = (
+        prospects.loc[non_custom_mask, "UWI"]
+        .astype(str).str.strip()
+        .replace({"": np.nan, "nan": np.nan})
+    )
     prospects.loc[non_custom_mask, "Label"] = prospects.loc[non_custom_mask, "Label"].where(
-        prospects.loc[non_custom_mask, "Label"].notna() & (prospects.loc[non_custom_mask, "Label"].astype(str).str.strip() != ""),
+        prospects.loc[non_custom_mask, "Label"].notna() &
+        (prospects.loc[non_custom_mask, "Label"].astype(str).str.strip() != ""),
         uwi_vals
     )
 
@@ -428,7 +502,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     hit_y = well_hits["_midpoint"].apply(lambda pt: pt.y)
     px_x = px_mp.apply(lambda pt: pt.x if pt else np.nan)
     px_y = px_mp.apply(lambda pt: pt.y if pt else np.nan)
-    well_hits["_dist"] = np.sqrt((hit_x - px_x)**2 + (hit_y - px_y)**2).replace(0, 1.0)
+    well_hits["_dist"] = np.sqrt((hit_x - px_x) ** 2 + (hit_y - px_y) ** 2).replace(0, 1.0)
     well_hits["_w"] = 1.0 / (well_hits["_dist"] ** 2)
 
     idw_results = {col: idw_for_column(well_hits, col, pros.index) for col in WELL_COLS}
@@ -539,9 +613,11 @@ else:
 
         if all(m is not None for m in [eur_model, ip90_model, y1_model]):
             resid_std = {}
-            for tag, model, src in [("EUR", eur_model, "Norm EUR"),
-                                     ("IP90", ip90_model, "Norm IP90"),
-                                     ("Y1", y1_model, "Norm 1Y Cuml")]:
+            for tag, model, src in [
+                ("EUR", eur_model, "Norm EUR"),
+                ("IP90", ip90_model, "Norm IP90"),
+                ("Y1", y1_model, "Norm 1Y Cuml"),
+            ]:
                 field[f"{tag}_resid"] = field[src] - model.predict(field[SECTION_ROIP_COL].values.reshape(-1, 1))
                 resid_std[tag] = field[f"{tag}_resid"].std()
 
@@ -574,8 +650,10 @@ else:
                     if field_roip_std > 0 else 0.0
                 )
                 pros_cls["Classification"] = pros_cls.apply(
-                    lambda r: classify_quadrant(r["Productivity_Z"], r["Resource_Z"],
-                                                prod_threshold, resource_threshold), axis=1,
+                    lambda r: classify_quadrant(
+                        r["Productivity_Z"], r["Resource_Z"], prod_threshold, resource_threshold
+                    ),
+                    axis=1,
                 )
 
                 for col in ["Classification", "Productivity_Z", "Resource_Z", "Z_EUR", "Z_IP90", "Z_1Y"]:
@@ -655,24 +733,32 @@ if has_classification:
 else:
     p["_line_color"] = "red"
 
-custom_no_cls = p["_is_custom"] & (~p["Classification"].notna() if "Classification" in p.columns else True)
+custom_no_cls = p["_is_custom"] & (
+    (~p["Classification"].notna()) if "Classification" in p.columns else True
+)
 p.loc[custom_no_cls, "_line_color"] = "#ff00ff"
 
 buffer_geoms = p.geometry.buffer(buffer_distance, cap_style=2)
-buffer_gdf = gpd.GeoDataFrame({
-    "_passes_filter": p["_passes_filter"].values,
-    "_no_proximal": p["_no_proximal"].values,
-    "_is_custom": p["_is_custom"].values,
-    "geometry": buffer_geoms,
-}, crs=p.crs).to_crs(4326)
+buffer_gdf = gpd.GeoDataFrame(
+    {
+        "_passes_filter": p["_passes_filter"].values,
+        "_no_proximal": p["_no_proximal"].values,
+        "_is_custom": p["_is_custom"].values,
+        "geometry": buffer_geoms,
+    },
+    crs=p.crs
+).to_crs(4326)
 
-p_lines_4326 = gpd.GeoDataFrame({
-    "_tooltip": p["_tooltip"].values,
-    "_line_color": p["_line_color"].values,
-    "_passes_filter": p["_passes_filter"].values,
-    "_is_custom": p["_is_custom"].values,
-    "geometry": p.geometry,
-}, crs=p.crs).to_crs(4326)
+p_lines_4326 = gpd.GeoDataFrame(
+    {
+        "_tooltip": p["_tooltip"].values,
+        "_line_color": p["_line_color"].values,
+        "_passes_filter": p["_passes_filter"].values,
+        "_is_custom": p["_is_custom"].values,
+        "geometry": p.geometry,
+    },
+    crs=p.crs
+).to_crs(4326)
 
 # ==========================================================
 # Title
@@ -685,7 +771,7 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — inside a fragment so it doesn't re-render on other interactions
+# MAP — no Draw tool, no returned events
 # ==========================================================
 bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
@@ -694,26 +780,13 @@ clon, clat = transformer_to_4326.transform(cx, cy)
 
 @st.fragment
 def render_map():
-    m = folium.Map(location=[clat, clon], zoom_start=11, tiles="CartoDB positron",
-                   prefer_canvas=True)
+    m = folium.Map(
+        location=[clat, clon],
+        zoom_start=11,
+        tiles="CartoDB positron",
+        prefer_canvas=True,
+    )
     MiniMap(toggle_display=True, position="bottomleft").add_to(m)
-
-    Draw(
-        export=False,
-        position="topleft",
-        draw_options={
-            "polyline": {
-                "shapeOptions": {"color": "#ff00ff", "weight": 4, "opacity": 0.9},
-                "allowIntersection": True,
-            },
-            "polygon": False,
-            "circle": False,
-            "rectangle": False,
-            "marker": False,
-            "circlemarker": False,
-        },
-        edit_options={"edit": False, "remove": True},
-    ).add_to(m)
 
     # ── Bakken Land ──
     land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
@@ -737,16 +810,24 @@ def render_map():
         if not grad_vals.empty:
             colormap = cm.LinearColormap(
                 ["#f7fcf5", "#74c476", "#00441b"],
-                vmin=float(grad_vals.min()), vmax=float(grad_vals.max()),
+                vmin=float(grad_vals.min()),
+                vmax=float(grad_vals.max()),
             ).to_step(n=7)
             colormap.caption = section_gradient
             m.add_child(colormap)
+
             sec_style = lambda feat, _col=section_gradient, _cm=colormap: (
-                {"fillColor": _cm(feat["properties"].get(_col)), "fillOpacity": 0.45,
-                 "color": "white", "weight": 0.3}
+                {
+                    "fillColor": _cm(feat["properties"].get(_col)),
+                    "fillOpacity": 0.45,
+                    "color": "white",
+                    "weight": 0.3,
+                }
                 if feat["properties"].get(_col) is not None
-                and not (isinstance(feat["properties"].get(_col), float)
-                         and np.isnan(feat["properties"].get(_col)))
+                and not (
+                    isinstance(feat["properties"].get(_col), float)
+                    and np.isnan(feat["properties"].get(_col))
+                )
                 else NULL_STYLE
             )
         else:
@@ -757,11 +838,15 @@ def render_map():
     sec_tip_fields = [c for c in section_4326.columns if c != "geometry"]
     section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
     folium.GeoJson(
-        section_4326.to_json(), style_function=sec_style,
+        section_4326.to_json(),
+        style_function=sec_style,
         highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
         tooltip=folium.GeoJsonTooltip(
-            fields=sec_tip_fields, aliases=[f"{f}:" for f in sec_tip_fields],
-            localize=True, sticky=True, style=TOOLTIP_STYLE,
+            fields=sec_tip_fields,
+            aliases=[f"{f}:" for f in sec_tip_fields],
+            localize=True,
+            sticky=True,
+            style=TOOLTIP_STYLE,
         ),
     ).add_to(section_fg)
     section_fg.add_to(m)
@@ -778,8 +863,11 @@ def render_map():
             style_function=lambda _: {"color": "transparent", "weight": 15, "opacity": 0},
             highlight_function=lambda _: {"weight": 15, "color": "#555", "opacity": 0.3},
             tooltip=folium.GeoJsonTooltip(
-                fields=well_tip_fields, aliases=[f"{f}:" for f in well_tip_fields],
-                localize=True, sticky=True, style=TOOLTIP_STYLE,
+                fields=well_tip_fields,
+                aliases=[f"{f}:" for f in well_tip_fields],
+                localize=True,
+                sticky=True,
+                style=TOOLTIP_STYLE,
             ),
         ).add_to(well_fg)
 
@@ -796,8 +884,13 @@ def render_map():
             ep = endpoint_of_geom(row.geometry)
             if ep:
                 folium.CircleMarker(
-                    [ep.y, ep.x], radius=1, color="black", fill=True,
-                    fill_color="black", fill_opacity=0.8, weight=1,
+                    [ep.y, ep.x],
+                    radius=1,
+                    color="black",
+                    fill=True,
+                    fill_color="black",
+                    fill_opacity=0.8,
+                    weight=1,
                 ).add_to(well_fg)
 
     for _, row in point_wells.iterrows():
@@ -806,8 +899,13 @@ def render_map():
             for c in well_tip_fields if c in row.index and pd.notna(row[c])
         )
         folium.CircleMarker(
-            [row.geometry.y, row.geometry.x], radius=2,
-            color="black", fill=True, fill_color="black", fill_opacity=0.9, weight=1,
+            [row.geometry.y, row.geometry.x],
+            radius=2,
+            color="black",
+            fill=True,
+            fill_color="black",
+            fill_opacity=0.9,
+            weight=1,
             tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
         ).add_to(well_fg)
     well_fg.add_to(m)
@@ -828,14 +926,16 @@ def render_map():
 
     folium.GeoJson(
         buffer_gdf[["_bstyle", "geometry"]].to_json(),
-        style_function=lambda feat: _BSTYLES.get(feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]),
+        style_function=lambda feat: _BSTYLES.get(
+            feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
+        ),
     ).add_to(buf_fg)
     buf_fg.add_to(m)
 
     # ── Prospect Wells ──
     prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
 
-    for idx, row in p_lines_4326.iterrows():
+    for _, row in p_lines_4326.iterrows():
         lc = row["_line_color"]
         tip = row["_tooltip"]
         is_custom = row.get("_is_custom", False)
@@ -852,52 +952,52 @@ def render_map():
             coords = list(row.geometry.coords)
             if len(coords) >= 2:
                 folium.RegularPolygonMarker(
-                    [coords[0][1], coords[0][0]], number_of_sides=4, radius=6,
-                    color=lc, fill=True, fill_color=lc, fill_opacity=0.9, weight=2,
+                    [coords[0][1], coords[0][0]],
+                    number_of_sides=4,
+                    radius=6,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=2,
                     rotation=45,
                     tooltip=folium.Tooltip(f"✏️ Heel<br>{tip}", sticky=True, style="font-size:12px"),
                 ).add_to(prospect_fg)
                 folium.RegularPolygonMarker(
-                    [coords[-1][1], coords[-1][0]], number_of_sides=5, radius=8,
-                    color=lc, fill=True, fill_color=lc, fill_opacity=0.9, weight=2,
+                    [coords[-1][1], coords[-1][0]],
+                    number_of_sides=5,
+                    radius=8,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=2,
                     tooltip=folium.Tooltip(f"✏️ Toe<br>{tip}", sticky=True, style="font-size:12px"),
                 ).add_to(prospect_fg)
         else:
             ep = endpoint_of_geom(row.geometry)
             if ep:
                 folium.CircleMarker(
-                    [ep.y, ep.x], radius=3, color=lc, fill=True,
-                    fill_color=lc, fill_opacity=0.9, weight=1,
+                    [ep.y, ep.x],
+                    radius=3,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=1,
                     tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
                 ).add_to(prospect_fg)
 
     prospect_fg.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
-    # ── Render ──
-    map_result = st_folium(
+    # No draw tool + no returned events
+    _ = st_folium(
         m,
         use_container_width=True,
         height=800,
-        returned_objects=["last_active_drawing"],
+        returned_objects=[],
     )
-
-    # ── Capture drawing (inside fragment — won't cause full page rerun) ──
-    if map_result and map_result.get("last_active_drawing"):
-        drawing = map_result["last_active_drawing"]
-        geom = drawing.get("geometry", {})
-        if geom.get("type") == "LineString":
-            coords = geom.get("coordinates", [])
-            if len(coords) >= 2:
-                coord_list = [(c[0], c[1]) for c in coords]
-                key = _coords_key(coord_list)
-                if key not in st.session_state.drawn_coords_set:
-                    st.session_state.drawn_coords_set.add(key)
-                    st.session_state.drawn_wells.append({
-                        "coords": coord_list,
-                        "label": None,
-                    })
-                    st.toast("✏️ Well captured! Click **Classify Drawn Wells** in the sidebar.", icon="✅")
 
 
 render_map()
@@ -932,7 +1032,8 @@ if not custom_prospects.empty:
             with c3:
                 st.markdown(
                     f"<span style='color:{cls_color};font-size:1.2em;font-weight:bold'>"
-                    f"{cls_str}</span>", unsafe_allow_html=True
+                    f"{cls_str}</span>",
+                    unsafe_allow_html=True
                 )
                 pz = cw_row.get("Productivity_Z", np.nan)
                 rz = cw_row.get("Resource_Z", np.nan)
@@ -995,8 +1096,10 @@ if classification_ready and "Classification" in p.columns:
                 symbol_map={"Prospect": "circle", "Custom": "star"},
                 hover_data=["Label"],
                 title="Productivity Z vs Resource Z",
-                labels={"Resource_Z": f"Resource Z ({SECTION_ROIP_COL})",
-                        "Productivity_Z": "Productivity Z (Composite)"},
+                labels={
+                    "Resource_Z": f"Resource Z ({SECTION_ROIP_COL})",
+                    "Productivity_Z": "Productivity Z (Composite)"
+                },
             )
 
             for trace in fig_quad.data:
@@ -1018,8 +1121,13 @@ if classification_ready and "Classification" in p.columns:
                 dict(x0=rx_min, x1=resource_threshold, y0=ry_min, y1=prod_threshold,
                      fillcolor=COLOR_MAP_CLASS["Low Prod / Low Resource"], opacity=0.07),
             ]:
-                fig_quad.add_shape(type="rect", xref="x", yref="y", layer="below",
-                                   line=dict(width=0), **rect)
+                fig_quad.add_shape(
+                    type="rect",
+                    xref="x", yref="y",
+                    layer="below",
+                    line=dict(width=0),
+                    **rect
+                )
 
             fig_quad.add_hline(y=prod_threshold, line_dash="dot", line_color="grey",
                                annotation_text=f"Prod σ = {prod_threshold}")
@@ -1048,7 +1156,8 @@ if classification_ready and "Classification" in p.columns:
         st.download_button(
             "📥 Download CSV",
             data=cls_display.to_csv(index=False),
-            file_name="classified_prospects.csv", mime="text/csv",
+            file_name="classified_prospects.csv",
+            mime="text/csv",
         )
 
 # No-proximal
