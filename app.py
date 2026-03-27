@@ -300,7 +300,8 @@ show_layers = {
 # Custom well management (now via paste box)
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
-st.sidebar.caption("Paste lon/lat coordinates below. Each well is a polyline (>=2 points).")
+st.sidebar.caption("Paste lon/lat coordinates from the URL below.")
+st.sidebar.caption("https://vidhu-km.github.io/invdraw/")
 
 # ---- Paste box ----
 st.sidebar.subheader("📌 Paste Coordinates (lon,lat)")
