@@ -777,8 +777,6 @@ bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
 clon, clat = transformer_to_4326.transform(cx, cy)
 
-
-@st.fragment
 def render_map():
     m = folium.Map(
         location=[clat, clon],
