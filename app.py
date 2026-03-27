@@ -301,7 +301,7 @@ show_layers = {
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
 st.sidebar.caption("Paste lon/lat coordinates from the URL below.")
-sb.markdown(
+st.sidebar.markdown(
     '<a href="https://vidhu-km.github.io/invdraw/" target="_blank">'
     '<button style="width:100%;padding:8px;background-color:#4a90d9;color:white;'
     'border:none;border-radius:5px;font-size:14px;cursor:pointer;">'
