@@ -3,7 +3,7 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import folium
-from folium.plugins import MiniMap  # Draw removed
+from folium.plugins import MiniMap
 from streamlit_folium import st_folium
 import branca.colormap as cm
 from shapely.geometry import Point, LineString
@@ -153,7 +153,6 @@ def parse_coord_line(line: str):
     line = line.strip()
     if not line:
         return None
-    # Accept "lon,lat" or "lon lat"
     line = line.replace(";", " ").replace(",", " ")
     parts = [p for p in line.split() if p]
     if len(parts) < 2:
@@ -184,9 +183,9 @@ def parse_wells_from_text(text: str):
     if current:
         wells.append(current)
 
-    # keep only wells with >=2 points
     wells = [w for w in wells if len(w) >= 2]
     return wells
+
 
 # ==========================================================
 # Load data (cached)
@@ -297,17 +296,13 @@ show_layers = {
     "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
 }
 
-# Custom well management (now via paste box)
+# Custom well management
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
 st.sidebar.caption("Paste lon/lat coordinates below. Each well is a polyline (>=2 points).")
 
-# ---- Paste box ----
 st.sidebar.subheader("📌 Paste Coordinates (lon,lat)")
-st.sidebar.caption(
-    "Use EPSG:4326 (WGS84). Format: `lon,lat` per line. "
-    "Blank line separates wells."
-)
+st.sidebar.caption("Use EPSG:4326 (WGS84). Format: `lon,lat` per line. Blank line separates wells.")
 
 coords_text = st.sidebar.text_area(
     "Pasted coords",
@@ -460,15 +455,15 @@ if unnamed_mask.any():
             prospects.at[row["_pidx"], "Label"] = str(row["Section"]).strip()
             prospects.at[row["_pidx"], "_label_is_section"] = True
 
-    section_labeled = prospects[prospects["_label_is_section"]]
-    dupe_labels = section_labeled["Label"].value_counts()
-    dupe_labels = dupe_labels[dupe_labels > 1].index
+        section_labeled = prospects[prospects["_label_is_section"]]
+        dupe_labels = section_labeled["Label"].value_counts()
+        dupe_labels = dupe_labels[dupe_labels > 1].index
 
-    for section_name in dupe_labels:
-        idxs = section_labeled[section_labeled["Label"] == section_name].index
-        suffix_gen = _suffix_generator()
-        for pidx in idxs:
-            prospects.at[pidx, "Label"] = f"{section_name}-{next(suffix_gen)}"
+        for section_name in dupe_labels:
+            idxs = section_labeled[section_labeled["Label"] == section_name].index
+            suffix_gen = _suffix_generator()
+            for pidx in idxs:
+                prospects.at[pidx, "Label"] = f"{section_name}-{next(suffix_gen)}"
 
 prospects["Label"] = prospects["Label"].fillna("")
 
@@ -490,7 +485,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     pros["_buffer"] = pros.geometry.buffer(buffer_m, cap_style=2)
 
     buffer_gdf = gpd.GeoDataFrame(
-        {"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs,
+        {"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs
     )
 
     midpt_gdf = prox[prox["_midpoint"].notna()].copy()
@@ -528,7 +523,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
 
     sec_join = gpd.sjoin(
         sections[["geometry", SECTION_OOIP_COL, SECTION_ROIP_COL]],
-        buffer_gdf, how="inner", predicate="intersects",
+        buffer_gdf, how="inner", predicate="intersects"
     )
     ooip_mean = sec_join.groupby("index_right")[SECTION_OOIP_COL].mean().reindex(pros.index)
     roip_mean = sec_join.groupby("index_right")[SECTION_ROIP_COL].mean().reindex(pros.index)
@@ -685,7 +680,6 @@ p["_passes_filter"] = filter_mask
 p["_no_proximal"] = ~has_proximal
 
 n_total, n_passing = len(p), int(filter_mask.sum())
-n_no_proximal = int((~has_proximal).sum())
 n_custom = int(p["_is_custom"].sum())
 
 # ==========================================================
@@ -726,9 +720,7 @@ def _build_tooltip_html(row):
 
 p["_tooltip"] = p.apply(_build_tooltip_html, axis=1)
 
-has_classification = classification_ready and "Classification" in p.columns
-
-if has_classification:
+if classification_ready and "Classification" in p.columns:
     p["_line_color"] = p["Classification"].map(COLOR_MAP_CLASS).fillna("red")
 else:
     p["_line_color"] = "red"
@@ -771,11 +763,20 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — no Draw tool, no returned events
+# MAP — fixed persistence
 # ==========================================================
-bounds = p.total_bounds
-cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
-clon, clat = transformer_to_4326.transform(cx, cy)
+# Robust bounds (if empty / invalid)
+if len(p) > 0 and np.isfinite(p.total_bounds).all():
+    bounds = p.total_bounds
+    cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
+    transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
+    clon, clat = transformer_to_4326.transform(cx, cy)
+else:
+    # fallback location (Bakken-ish)
+    clat, clon = 47.5, -103.2
+
+# stable key so reruns don't remount oddly
+map_key = f"map_{n_custom}_{buffer_distance}"
 
 def render_map():
     m = folium.Map(
@@ -803,7 +804,10 @@ def render_map():
     units_fg.add_to(m)
 
     # ── Section Grid ──
-    if section_gradient != "None" and section_gradient in section_4326.columns:
+    section_fg_show = (section_gradient != "None")
+    section_fg = folium.FeatureGroup(name="Section Grid", show=section_fg_show)
+
+    if section_fg_show and section_gradient in section_4326.columns:
         grad_vals = section_4326[section_gradient].dropna()
         if not grad_vals.empty:
             colormap = cm.LinearColormap(
@@ -834,7 +838,6 @@ def render_map():
         sec_style = lambda _: NULL_STYLE
 
     sec_tip_fields = [c for c in section_4326.columns if c != "geometry"]
-    section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
     folium.GeoJson(
         section_4326.to_json(),
         style_function=sec_style,
@@ -873,6 +876,7 @@ def render_map():
         for c in line_clean.columns:
             if c != "geometry" and line_clean[c].dtype == object:
                 line_clean[c] = line_clean[c].astype(str)
+
         folium.GeoJson(
             line_clean.to_json(),
             style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
@@ -906,99 +910,108 @@ def render_map():
             weight=1,
             tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
         ).add_to(well_fg)
+
     well_fg.add_to(m)
 
     # ── Prospect Buffers ──
     buf_fg = folium.FeatureGroup(name="Prospect Buffers")
-    buffer_gdf["_bstyle"] = "fail"
-    buffer_gdf.loc[buffer_gdf["_passes_filter"], "_bstyle"] = "pass"
-    buffer_gdf.loc[buffer_gdf["_no_proximal"], "_bstyle"] = "noprox"
-    buffer_gdf.loc[buffer_gdf["_is_custom"], "_bstyle"] = "custom"
+    if not buffer_gdf.empty:
+        buffer_gdf["_bstyle"] = "fail"
+        buffer_gdf.loc[buffer_gdf["_passes_filter"], "_bstyle"] = "pass"
+        buffer_gdf.loc[buffer_gdf["_no_proximal"], "_bstyle"] = "noprox"
+        buffer_gdf.loc[buffer_gdf["_is_custom"], "_bstyle"] = "custom"
 
-    _BSTYLES = {
-        "pass":   {"fillOpacity": 0, "color": "#000", "weight": 1.2, "opacity": 0.6, "dashArray": "6 4"},
-        "fail":   {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.25, "dashArray": "6 4"},
-        "noprox": {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.3, "dashArray": "4 6"},
-        "custom": {"fillOpacity": 0.04, "fillColor": "#ff00ff", "color": "#ff00ff", "weight": 1.5, "opacity": 0.7, "dashArray": "4 4"},
-    }
+        _BSTYLES = {
+            "pass":   {"fillOpacity": 0, "color": "#000", "weight": 1.2, "opacity": 0.6, "dashArray": "6 4"},
+            "fail":   {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.25, "dashArray": "6 4"},
+            "noprox": {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.3, "dashArray": "4 6"},
+            "custom": {"fillOpacity": 0.04, "fillColor": "#ff00ff", "color": "#ff00ff", "weight": 1.5, "opacity": 0.7, "dashArray": "4 4"},
+        }
 
-    folium.GeoJson(
-        buffer_gdf[["_bstyle", "geometry"]].to_json(),
-        style_function=lambda feat: _BSTYLES.get(
-            feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
-        ),
-    ).add_to(buf_fg)
+        folium.GeoJson(
+            buffer_gdf[["_bstyle", "geometry"]].to_json(),
+            style_function=lambda feat: _BSTYLES.get(
+                feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
+            ),
+        ).add_to(buf_fg)
+
     buf_fg.add_to(m)
 
     # ── Prospect Wells ──
     prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
 
-    for _, row in p_lines_4326.iterrows():
-        lc = row["_line_color"]
-        tip = row["_tooltip"]
-        is_custom = row.get("_is_custom", False)
-        line_weight = 5 if is_custom else 3
+    if not p_lines_4326.empty:
+        for _, row in p_lines_4326.iterrows():
+            lc = row["_line_color"]
+            tip = row["_tooltip"]
+            is_custom = row.get("_is_custom", False)
+            line_weight = 5 if is_custom else 3
 
-        folium.GeoJson(
-            row.geometry.__geo_interface__,
-            style_function=lambda _, _lc=lc, _w=line_weight: {"color": _lc, "weight": _w, "opacity": 0.9},
-            highlight_function=lambda _: {"weight": 7, "color": "#ff4444"},
-            tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
-        ).add_to(prospect_fg)
+            folium.GeoJson(
+                row.geometry.__geo_interface__,
+                style_function=lambda _, _lc=lc, _w=line_weight: {"color": _lc, "weight": _w, "opacity": 0.9},
+                highlight_function=lambda _: {"weight": 7, "color": "#ff4444"},
+                tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
+            ).add_to(prospect_fg)
 
-        if is_custom:
-            coords = list(row.geometry.coords)
-            if len(coords) >= 2:
-                folium.RegularPolygonMarker(
-                    [coords[0][1], coords[0][0]],
-                    number_of_sides=4,
-                    radius=6,
-                    color=lc,
-                    fill=True,
-                    fill_color=lc,
-                    fill_opacity=0.9,
-                    weight=2,
-                    rotation=45,
-                    tooltip=folium.Tooltip(f"✏️ Heel<br>{tip}", sticky=True, style="font-size:12px"),
-                ).add_to(prospect_fg)
-                folium.RegularPolygonMarker(
-                    [coords[-1][1], coords[-1][0]],
-                    number_of_sides=5,
-                    radius=8,
-                    color=lc,
-                    fill=True,
-                    fill_color=lc,
-                    fill_opacity=0.9,
-                    weight=2,
-                    tooltip=folium.Tooltip(f"✏️ Toe<br>{tip}", sticky=True, style="font-size:12px"),
-                ).add_to(prospect_fg)
-        else:
-            ep = endpoint_of_geom(row.geometry)
-            if ep:
-                folium.CircleMarker(
-                    [ep.y, ep.x],
-                    radius=3,
-                    color=lc,
-                    fill=True,
-                    fill_color=lc,
-                    fill_opacity=0.9,
-                    weight=1,
-                    tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
-                ).add_to(prospect_fg)
+            if is_custom:
+                coords = list(row.geometry.coords)
+                if len(coords) >= 2:
+                    folium.RegularPolygonMarker(
+                        [coords[0][1], coords[0][0]],
+                        number_of_sides=4,
+                        radius=6,
+                        color=lc,
+                        fill=True,
+                        fill_color=lc,
+                        fill_opacity=0.9,
+                        weight=2,
+                        rotation=45,
+                        tooltip=folium.Tooltip(f"✏️ Heel<br>{tip}", sticky=True, style="font-size:12px"),
+                    ).add_to(prospect_fg)
+                    folium.RegularPolygonMarker(
+                        [coords[-1][1], coords[-1][0]],
+                        number_of_sides=5,
+                        radius=8,
+                        color=lc,
+                        fill=True,
+                        fill_color=lc,
+                        fill_opacity=0.9,
+                        weight=2,
+                        tooltip=folium.Tooltip(f"✏️ Toe<br>{tip}", sticky=True, style="font-size:12px"),
+                    ).add_to(prospect_fg)
+            else:
+                ep = endpoint_of_geom(row.geometry)
+                if ep:
+                    folium.CircleMarker(
+                        [ep.y, ep.x],
+                        radius=3,
+                        color=lc,
+                        fill=True,
+                        fill_color=lc,
+                        fill_opacity=0.9,
+                        weight=1,
+                        tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
+                    ).add_to(prospect_fg)
 
     prospect_fg.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
-    # No draw tool + no returned events
-    _ = st_folium(
+    # Always call st_folium, with a stable key
+    st_folium(
         m,
         use_container_width=True,
         height=800,
         returned_objects=[],
+        key=map_key,
     )
 
 
-render_map()
+# Render map inside a try/except so it never “disappears”
+try:
+    render_map()
+except Exception as e:
+    st.warning(f"Map rendering temporarily failed: {e}")
 
 # ==========================================================
 # Custom Well Results
