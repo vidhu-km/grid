@@ -181,7 +181,6 @@ def midpoint_to_wgs84(g):
 # ==========================================================
 @st.cache_resource(show_spinner="Loading spatial data …")
 def load_data():
-    # ---- FIX: validate all files exist before attempting to read ----
     import os
     required_files = {
         "lines.shp": "Wellbore lateral lines",
@@ -195,7 +194,6 @@ def load_data():
     missing = []
     for fname, desc in required_files.items():
         if not os.path.exists(fname):
-            # also check for .shp sidecar files
             if fname.endswith(".shp"):
                 stem = fname[:-4]
                 has_sidecar = any(
@@ -285,9 +283,8 @@ def load_data():
     return (
         lines, points, grid, inv,
         land, well_df_out, section_df, sec_numeric_cols,
-        section_4326, units_4326, land_json, units_json,
-        proximal_wells,
-        units,
+        section_4326, units_4326, land_json, units_json, proximal_wells,
+        units
     )
 
 
@@ -477,10 +474,8 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     midpt_gdf = prox[prox["_midpoint"].notna()].copy()
     midpt_gdf = midpt_gdf.set_geometry(gpd.GeoSeries(midpt_gdf["_midpoint"], crs=prox.crs))
 
-    # wells within buffer
     well_hits = gpd.sjoin(midpt_gdf, buffer_gdf, how="inner", predicate="within")
 
-    # inverse-distance-squared weight
     px_mp = well_hits["index_right"].map(pros["_midpoint"])
     hit_x = well_hits["_midpoint"].apply(lambda pt: pt.x)
     hit_y = well_hits["_midpoint"].apply(lambda pt: pt.y)
@@ -499,7 +494,6 @@ def analyze_prospects(pros, prox, sections, buffer_m):
         .reindex(pros.index, fill_value="")
     )
 
-    # sum columns for wells intersecting buffer
     sum_results = {}
     for sc in SUM_COLS:
         if sc in prox.columns:
@@ -512,7 +506,6 @@ def analyze_prospects(pros, prox, sections, buffer_m):
         else:
             sum_results[sc] = pd.Series(0, index=pros.index)
 
-    # section means by intersection with buffer
     sec_join = gpd.sjoin(
         sections[["geometry", SECTION_OOIP_COL, SECTION_ROIP_COL]],
         buffer_gdf,
@@ -660,7 +653,6 @@ else:
                     axis=1,
                 )
 
-                # write back to prospects
                 for col in [
                     "Classification", "Productivity_Z", "Resource_Z",
                     "Z_EUR", "Z_IP90", "Z_1Y",
@@ -709,7 +701,6 @@ p["_line_color"] = "red"
 if classification_ready and "Classification" in p.columns:
     p["_line_color"] = p["Classification"].map(COLOR_MAP_CLASS).fillna("red")
 
-# ---- FIX: broken boolean logic for custom wells without classification ----
 if "Classification" in p.columns:
     custom_no_cls = p["_is_custom"] & p["Classification"].isna()
 else:
@@ -811,7 +802,58 @@ def render_map():
             gdf["geometry"] = gdf.geometry.simplify(simplify_tol, preserve_topology=True)
             return gdf.to_json()
         except Exception:
-            return None
+            try:
+                return gdf.to_json()
+            except Exception:
+                return None
+
+    # ---------------------------
+    # Base datasets: lines / points / inv.shp
+    # ---------------------------
+    base_fg = folium.FeatureGroup(name="lines.shp + points.shp", show=True)
+    inv_fg = folium.FeatureGroup(name="inv.shp", show=True)
+
+    # lines.shp
+    lines_4326 = _lines_gdf.to_crs(4326)
+    lines_data = safe_geojson(lines_4326, 30)
+    if lines_data:
+        folium.GeoJson(
+            lines_data,
+            style_function=lambda _: {
+                "color": "#d62728",
+                "weight": 2,
+                "opacity": 0.9,
+            },
+        ).add_to(base_fg)
+
+    # points.shp
+    points_4326 = _points_gdf.to_crs(4326)
+    points_data = safe_geojson(points_4326, 0)
+    if points_data:
+        folium.GeoJson(
+            points_data,
+            style_function=lambda _: {
+                "color": "#1f77b4",
+                "weight": 1,
+                "opacity": 0.95,
+                "fillOpacity": 0.9,
+            },
+        ).add_to(base_fg)
+
+    # inv.shp (polygons)
+    inv_data = safe_geojson(inv_4326, 60)
+    if inv_data:
+        folium.GeoJson(
+            inv_data,
+            style_function=lambda _: {
+                "color": "#999",
+                "weight": 1,
+                "fillOpacity": 0.06,
+            },
+        ).add_to(inv_fg)
+
+    base_fg.add_to(m)
+    inv_fg.add_to(m)
 
     # ---------------------------
     # Land
@@ -851,7 +893,7 @@ def render_map():
     units_fg.add_to(m)
 
     # ---------------------------
-    # Section grid (SAFE)
+    # Section grid
     # ---------------------------
     section_fg = folium.FeatureGroup(name="Section Grid", show=False)
 
@@ -867,24 +909,6 @@ def render_map():
         ).add_to(section_fg)
 
     section_fg.add_to(m)
-
-    # ---------------------------
-    # Inventory
-    # ---------------------------
-    inv_fg = folium.FeatureGroup(name="Inventory", show=True)
-
-    inv_data = safe_geojson(inv_4326, 80)
-    if inv_data:
-        folium.GeoJson(
-            inv_data,
-            style_function=lambda _: {
-                "color": "#999",
-                "weight": 1,
-                "fillOpacity": 0.05,
-            },
-        ).add_to(inv_fg)
-
-    inv_fg.add_to(m)
 
     # ---------------------------
     # Buffers
@@ -909,7 +933,7 @@ def render_map():
     buf_fg.add_to(m)
 
     # ---------------------------
-    # Prospect lines (FIXED lambda)
+    # Prospect lines
     # ---------------------------
     prospect_fg = folium.FeatureGroup(name="Prospects", show=True)
 
@@ -936,15 +960,12 @@ def render_map():
 
     folium.LayerControl().add_to(m)
 
-    # ---------------------------
-    # CRITICAL FIX
-    # ---------------------------
     st_folium(
         m,
         use_container_width=True,
         height=800,
     )
-    
+
 render_map()
 
 # ==========================================================
@@ -970,8 +991,10 @@ else:
     table_cols = [c for c in table_cols if c in p_display.columns]
     df = (
         p_display[table_cols]
-        .sort_values("Proximal_Count" if "Proximal_Count" in p_display.columns else table_cols[0],
-                      ascending=False)
+        .sort_values(
+            "Proximal_Count" if "Proximal_Count" in p_display.columns else table_cols[0],
+            ascending=False,
+        )
         .reset_index(drop=True)
     )
     df.rename(columns={"_is_custom": "Custom Well"}, inplace=True)
