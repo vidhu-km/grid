@@ -188,6 +188,7 @@ def parse_wells_from_text(text: str):
     wells = [w for w in wells if len(w) >= 2]
     return wells
 
+
 # ==========================================================
 # Load data (cached)
 # ==========================================================
@@ -196,9 +197,9 @@ def load_data():
     lines = gpd.read_file("lines.shp")
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
-    infills = gpd.read_file("inf.shp")
-    merged = gpd.read_file("merged_inventory.shp")
-    lease_lines = gpd.read_file("ll.shp")
+    infills = gpd.read_file("inf.shp")  # <-- your single prospect layer
+    merged = gpd.read_file("merged_inventory.shp")  # kept (not used now)
+    lease_lines = gpd.read_file("ll.shp")  # kept (not used now)
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
     well_df = pd.read_excel("wells.xlsx", sheet_name=0)
@@ -269,7 +270,8 @@ def load_data():
     land_json, units_json, proximal_wells
 ) = load_data()
 
-LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
+# Keep only what we need for prospect frames
+LAYER_GDFS = {"Infill": infills_gdf}
 
 # ==========================================================
 # Session state
@@ -291,11 +293,13 @@ buffer_distance = st.sidebar.slider("Buffer Distance (m)", 100, 2000, DEFAULT_BU
 st.sidebar.markdown("---")
 section_gradient = st.sidebar.selectbox("Section Grid Colour", ["None"] + SEC_NUMERIC_COLS)
 
-show_layers = {
-    "Infill": st.sidebar.checkbox("Unit Infills", value=True),
-    "Lease Line": st.sidebar.checkbox("Unit Lease Lines", value=True),
-    "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
-}
+# -----------------------------
+# Prospect Layers (REMOVED)
+# -----------------------------
+# Single prospect layer now: inf.shp only, so no multiple checkboxes.
+st.sidebar.markdown("---")
+st.sidebar.subheader("Prospect Layers")
+st.sidebar.info("Using single prospect layer: `inf.shp` (infill lines).")
 
 # Custom well management (now via paste box)
 st.sidebar.markdown("---")
@@ -377,16 +381,17 @@ else:
     st.sidebar.info("No custom wells added yet.")
 
 # ==========================================================
-# Build prospect set
+# Build prospect set (single layer now)
 # ==========================================================
 prospect_frames = []
-for name, enabled in show_layers.items():
-    if enabled:
-        f = LAYER_GDFS[name].copy()
-        f["_prospect_type"] = name
-        f["_is_custom"] = False
-        prospect_frames.append(f)
 
+# Always include infills (inf.shp) only
+f = infills_gdf.copy()
+f["_prospect_type"] = "Infill"
+f["_is_custom"] = False
+prospect_frames.append(f)
+
+# Add custom wells (if any)
 if st.session_state.drawn_wells:
     tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
     custom_rows = []
@@ -404,10 +409,6 @@ if st.session_state.drawn_wells:
     if custom_rows:
         custom_gdf = gpd.GeoDataFrame(custom_rows, crs="EPSG:26913")
         prospect_frames.append(custom_gdf)
-
-if not prospect_frames:
-    st.error("Enable at least one prospect layer.")
-    st.stop()
 
 prospects = gpd.GeoDataFrame(
     pd.concat(prospect_frames, ignore_index=True),
@@ -561,7 +562,9 @@ for col in ALL_METRIC_COLS:
     if col in prospects.columns:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
+# ==========================================================
 # Coordinates
+# ==========================================================
 _tf = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 
 _endpoints = prospects.geometry.apply(endpoint_of_geom)
@@ -778,7 +781,7 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — no Draw tool, no returned events
+# MAP — no Draw tool + no returned events
 # ==========================================================
 bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
@@ -887,20 +890,30 @@ def render_map():
             style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
         ).add_to(well_fg)
 
+        # WF endpoints: blue if WF > 0
         for _, row in line_wells.iterrows():
             ep = endpoint_of_geom(row.geometry)
             if ep:
+                wf_val = row.get("WF", np.nan)
+                is_wf = pd.notna(wf_val) and float(wf_val) > 0
+
+                color = "#1f77b4" if is_wf else "black"
                 folium.CircleMarker(
                     [ep.y, ep.x],
                     radius=1,
-                    color="black",
+                    color=color,
                     fill=True,
-                    fill_color="black",
+                    fill_color=color,
                     fill_opacity=0.8,
                     weight=1,
                 ).add_to(well_fg)
 
+    # Point wells: WF > 0 => blue
     for _, row in point_wells.iterrows():
+        wf_val = row.get("WF", np.nan)
+        is_wf = pd.notna(wf_val) and float(wf_val) > 0
+        color = "#1f77b4" if is_wf else "black"
+
         tip = "<br>".join(
             f"<b>{c}:</b> {fmt_val(c, row[c]) if isinstance(row[c], (int, float)) else row[c]}"
             for c in well_tip_fields if c in row.index and pd.notna(row[c])
@@ -908,13 +921,14 @@ def render_map():
         folium.CircleMarker(
             [row.geometry.y, row.geometry.x],
             radius=2,
-            color="black",
+            color=color,
             fill=True,
-            fill_color="black",
-            fill_opacity=0.9,
+            fill_color=color,
+            fill_opacity=0.95 if is_wf else 0.9,
             weight=1,
             tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
         ).add_to(well_fg)
+
     well_fg.add_to(m)
 
     # ── Prospect Buffers ──
