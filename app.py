@@ -3,7 +3,7 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import folium
-from folium.plugins import MiniMap  # Draw removed
+from folium.plugins import MiniMap
 from streamlit_folium import st_folium
 import branca.colormap as cm
 from shapely.geometry import Point, LineString
@@ -153,7 +153,6 @@ def parse_coord_line(line: str):
     line = line.strip()
     if not line:
         return None
-    # Accept "lon,lat" or "lon lat"
     line = line.replace(";", " ").replace(",", " ")
     parts = [p for p in line.split() if p]
     if len(parts) < 2:
@@ -164,10 +163,6 @@ def parse_coord_line(line: str):
 
 
 def parse_wells_from_text(text: str):
-    """
-    Multiple wells separated by blank lines.
-    Each well: >=2 lines of "lon,lat".
-    """
     wells = []
     current = []
     for raw in text.splitlines():
@@ -184,7 +179,6 @@ def parse_wells_from_text(text: str):
     if current:
         wells.append(current)
 
-    # keep only wells with >=2 points
     wells = [w for w in wells if len(w) >= 2]
     return wells
 
@@ -197,15 +191,20 @@ def load_data():
     lines = gpd.read_file("lines.shp")
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
-    infills = gpd.read_file("inf.shp")  # <-- your single prospect layer
-    merged = gpd.read_file("merged_inventory.shp")  # kept (not used now)
-    lease_lines = gpd.read_file("ll.shp")  # kept (not used now)
+
+    # ✅ CHANGED: merged/inf/ll combined into a single file: `inv.shp`
+    inv = gpd.read_file("inv.shp")
+
+    merged = gpd.read_file("merged_inventory.shp")
+
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
+
     well_df = pd.read_excel("wells.xlsx", sheet_name=0)
     section_df = pd.read_excel("wells.xlsx", sheet_name=1)
 
-    for gdf in [lines, points, grid, units, infills, lease_lines, merged, land]:
+    # CRS handling
+    for gdf in [lines, points, grid, units, inv, merged, land]:
         if gdf.crs is None:
             gdf.set_crs(epsg=26913, inplace=True)
         gdf.to_crs(epsg=26913, inplace=True)
@@ -245,33 +244,51 @@ def load_data():
     land_json = land_4326.to_json()
     units_json = units_4326.to_json()
 
+    # Existing wells used for proximal matching
     lines_with_uwi = lines[["UWI", "geometry"]]
     points_only = points[~points["UWI"].isin(lines_with_uwi["UWI"])][["UWI", "geometry"]]
     existing_wells = gpd.GeoDataFrame(
         pd.concat([lines_with_uwi, points_only], ignore_index=True),
         geometry="geometry", crs=lines.crs,
     )
+
     proximal_wells = gpd.GeoDataFrame(
         existing_wells.merge(well_df_out, on="UWI", how="inner"),
         geometry="geometry", crs=existing_wells.crs,
     )
     proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
-    return (lines, points, grid, units, infills, lease_lines, merged, land,
-            well_df_out, section_df, sec_numeric_cols,
-            grid_enriched, section_4326, units_4326, land_4326,
-            land_json, units_json, proximal_wells)
+    return (
+        lines,
+        points,
+        grid,
+        inv,            # ✅ replaces inf/ll
+        merged,
+        land,
+        well_df_out,
+        section_df,
+        sec_numeric_cols,
+        section_4326,
+        units_4326,
+        land_json,
+        units_json,
+        proximal_wells,
+        units,
+    )
 
 
 (
-    lines_gdf, points_gdf, grid_gdf, units_gdf, infills_gdf, lease_lines_gdf,
+    lines_gdf, points_gdf, grid_gdf, inv_gdf,
     merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
-    section_enriched, section_4326, units_4326, land_4326,
-    land_json, units_json, proximal_wells
+    section_enriched_4326, units_4326, land_json, units_json, proximal_wells, units_gdf
 ) = load_data()
 
-# Keep only what we need for prospect frames
-LAYER_GDFS = {"Infill": infills_gdf}
+# Unifying layer gdfs
+# NOTE: we removed separate inf and lease_lines; now we treat `inv.shp` as "Infill + Lease + etc".
+LAYER_GDFS = {
+    "Inventory (inv.shp)": inv_gdf,
+    "Merged": merged_gdf
+}
 
 # ==========================================================
 # Session state
@@ -293,15 +310,12 @@ buffer_distance = st.sidebar.slider("Buffer Distance (m)", 100, 2000, DEFAULT_BU
 st.sidebar.markdown("---")
 section_gradient = st.sidebar.selectbox("Section Grid Colour", ["None"] + SEC_NUMERIC_COLS)
 
-# -----------------------------
-# Prospect Layers (REMOVED)
-# -----------------------------
-# Single prospect layer now: inf.shp only, so no multiple checkboxes.
-st.sidebar.markdown("---")
-st.sidebar.subheader("Prospect Layers")
-st.sidebar.info("Using single prospect layer: `inf.shp` (infill lines).")
+show_layers = {
+    "Inventory (inv.shp)": st.sidebar.checkbox("Inventory (inv.shp)", value=True),
+    "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
+}
 
-# Custom well management (now via paste box)
+# Custom well management (paste box)
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
 st.sidebar.caption("Paste lon/lat coordinates from the URL below.")
@@ -313,7 +327,6 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
-# ---- Paste box ----
 st.sidebar.subheader("📌 Paste Coordinates (lon,lat)")
 st.sidebar.caption(
     "Use EPSG:4326 (WGS84). Format: `lon,lat` per line. "
@@ -348,7 +361,6 @@ if st.sidebar.button("➕ Add to Custom Wells", type="primary"):
         st.toast("Custom well(s) added.", icon="✅")
         st.rerun()
 
-# Edit/delete existing custom wells
 if st.session_state.drawn_wells:
     wells_to_delete = []
     for i, cw in enumerate(st.session_state.drawn_wells):
@@ -381,17 +393,16 @@ else:
     st.sidebar.info("No custom wells added yet.")
 
 # ==========================================================
-# Build prospect set (single layer now)
+# Build prospect set
 # ==========================================================
 prospect_frames = []
+for name, enabled in show_layers.items():
+    if enabled:
+        f = LAYER_GDFS[name].copy()
+        f["_prospect_type"] = name
+        f["_is_custom"] = False
+        prospect_frames.append(f)
 
-# Always include infills (inf.shp) only
-f = infills_gdf.copy()
-f["_prospect_type"] = "Infill"
-f["_is_custom"] = False
-prospect_frames.append(f)
-
-# Add custom wells (if any)
 if st.session_state.drawn_wells:
     tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
     custom_rows = []
@@ -410,9 +421,13 @@ if st.session_state.drawn_wells:
         custom_gdf = gpd.GeoDataFrame(custom_rows, crs="EPSG:26913")
         prospect_frames.append(custom_gdf)
 
+if not prospect_frames:
+    st.error("Enable at least one prospect layer.")
+    st.stop()
+
 prospects = gpd.GeoDataFrame(
     pd.concat(prospect_frames, ignore_index=True),
-    geometry="geometry", crs=infills_gdf.crs,
+    geometry="geometry", crs=inv_gdf.crs,
 )
 
 if "_is_custom" not in prospects.columns:
@@ -451,7 +466,6 @@ if unnamed_mask.any():
             {"_pidx": valid_ep.index, "geometry": valid_ep.values},
             crs=prospects.crs,
         )
-
         joined = gpd.sjoin(ep_gdf, grid_gdf[["Section", "geometry"]], how="left", predicate="within")
 
         still_missing = joined["Section"].isna()
@@ -554,7 +568,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     return out
 
 
-prospect_metrics = analyze_prospects(prospects, proximal_wells, section_enriched, buffer_distance)
+prospect_metrics = analyze_prospects(prospects, proximal_wells, grid_gdf, buffer_distance)
 for c in prospect_metrics.columns:
     prospects[c] = prospect_metrics[c].values
 
@@ -563,7 +577,7 @@ for col in ALL_METRIC_COLS:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
 # ==========================================================
-# Coordinates
+# Coordinates (for tables)
 # ==========================================================
 _tf = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 
@@ -573,9 +587,7 @@ _ep_y = _endpoints.apply(lambda pt: pt.y if pt else np.nan)
 valid_ep = _ep_x.notna()
 _lon_bh, _lat_bh = np.full(len(prospects), np.nan), np.full(len(prospects), np.nan)
 if valid_ep.any():
-    _lon_bh[valid_ep], _lat_bh[valid_ep] = _tf.transform(
-        _ep_x[valid_ep].values, _ep_y[valid_ep].values
-    )
+    _lon_bh[valid_ep], _lat_bh[valid_ep] = _tf.transform(_ep_x[valid_ep].values, _ep_y[valid_ep].values)
 prospects["BH Latitude"] = np.round(_lat_bh, 6)
 prospects["BH Longitude"] = np.round(_lon_bh, 6)
 
@@ -585,9 +597,7 @@ _sp_y = _startpoints.apply(lambda pt: pt.y if pt else np.nan)
 valid_sp = _sp_x.notna()
 _lon_heel, _lat_heel = np.full(len(prospects), np.nan), np.full(len(prospects), np.nan)
 if valid_sp.any():
-    _lon_heel[valid_sp], _lat_heel[valid_sp] = _tf.transform(
-        _sp_x[valid_sp].values, _sp_y[valid_sp].values
-    )
+    _lon_heel[valid_sp], _lat_heel[valid_sp] = _tf.transform(_sp_x[valid_sp].values, _sp_y[valid_sp].values)
 prospects["Heel Latitude"] = np.round(_lat_heel, 6)
 prospects["Heel Longitude"] = np.round(_lon_heel, 6)
 
@@ -736,9 +746,7 @@ def _build_tooltip_html(row):
 
 p["_tooltip"] = p.apply(_build_tooltip_html, axis=1)
 
-has_classification = classification_ready and "Classification" in p.columns
-
-if has_classification:
+if classification_ready and "Classification" in p.columns:
     p["_line_color"] = p["Classification"].map(COLOR_MAP_CLASS).fillna("red")
 else:
     p["_line_color"] = "red"
@@ -781,7 +789,7 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — no Draw tool + no returned events
+# MAP
 # ==========================================================
 bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
@@ -815,8 +823,8 @@ def render_map():
     units_fg.add_to(m)
 
     # ── Section Grid ──
-    if section_gradient != "None" and section_gradient in section_4326.columns:
-        grad_vals = section_4326[section_gradient].dropna()
+    if section_gradient != "None" and section_gradient in section_enriched_4326.columns:
+        grad_vals = section_enriched_4326[section_gradient].dropna()
         if not grad_vals.empty:
             colormap = cm.LinearColormap(
                 ["#f7fcf5", "#74c476", "#00441b"],
@@ -845,10 +853,10 @@ def render_map():
     else:
         sec_style = lambda _: NULL_STYLE
 
-    sec_tip_fields = [c for c in section_4326.columns if c != "geometry"]
+    sec_tip_fields = [c for c in section_enriched_4326.columns if c != "geometry"]
     section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
     folium.GeoJson(
-        section_4326.to_json(),
+        section_enriched_4326.to_json(),
         style_function=sec_style,
         highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
         tooltip=folium.GeoJsonTooltip(
@@ -861,13 +869,19 @@ def render_map():
     ).add_to(section_fg)
     section_fg.add_to(m)
 
-    # ── Existing Wells ──
+    # ── Existing Wells (CHANGE HERE) ──
+    # ✅ Make all wells with WF > 0 blue on the map.
+    # We color BOTH line- and point-geometries based on WF in `proximal_wells`.
     well_fg = folium.FeatureGroup(name="Existing Wells")
-    line_wells = existing_display[existing_display.geometry.type != "Point"]
-    point_wells = existing_display[existing_display.geometry.type == "Point"]
+
+    line_wells = existing_display[existing_display.geometry.type != "Point"].copy()
+    point_wells = existing_display[existing_display.geometry.type == "Point"].copy()
+
     well_tip_fields = [c for c in existing_display.columns if c not in ("geometry", "_midpoint")]
 
+    # line wells
     if not line_wells.empty:
+        # Tooltip layer (invisible)
         folium.GeoJson(
             line_wells[well_tip_fields + ["geometry"]].to_json(),
             style_function=lambda _: {"color": "transparent", "weight": 15, "opacity": 0},
@@ -881,41 +895,38 @@ def render_map():
             ),
         ).add_to(well_fg)
 
-        line_clean = line_wells.drop(columns=["_midpoint"], errors="ignore")
-        for c in line_clean.columns:
-            if c != "geometry" and line_clean[c].dtype == object:
-                line_clean[c] = line_clean[c].astype(str)
-        folium.GeoJson(
-            line_clean.to_json(),
-            style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
-        ).add_to(well_fg)
+        # actual styling by WF
+        for _, row in line_wells.iterrows():
+            wf_val = row.get("WF", np.nan)
+            color = "#1f77ff" if pd.notna(wf_val) and float(wf_val) > 0 else "black"
+            folium.GeoJson(
+                row.geometry.__geo_interface__,
+                style_function=lambda _, _c=color: {"color": _c, "weight": 0.5, "opacity": 0.9},
+            ).add_to(well_fg)
 
-        # WF endpoints: blue if WF > 0
+        # endpoint markers
         for _, row in line_wells.iterrows():
             ep = endpoint_of_geom(row.geometry)
             if ep:
                 wf_val = row.get("WF", np.nan)
-                is_wf = pd.notna(wf_val) and float(wf_val) > 0
-
-                color = "#1f77b4" if is_wf else "black"
+                color = "#1f77ff" if pd.notna(wf_val) and float(wf_val) > 0 else "black"
                 folium.CircleMarker(
                     [ep.y, ep.x],
                     radius=1,
                     color=color,
                     fill=True,
                     fill_color=color,
-                    fill_opacity=0.8,
+                    fill_opacity=0.9,
                     weight=1,
                 ).add_to(well_fg)
 
-    # Point wells: WF > 0 => blue
+    # point wells
     for _, row in point_wells.iterrows():
         wf_val = row.get("WF", np.nan)
-        is_wf = pd.notna(wf_val) and float(wf_val) > 0
-        color = "#1f77b4" if is_wf else "black"
+        color = "#1f77ff" if pd.notna(wf_val) and float(wf_val) > 0 else "black"
 
         tip = "<br>".join(
-            f"<b>{c}:</b> {fmt_val(c, row[c]) if isinstance(row[c], (int, float)) else row[c]}"
+            f"<b>{c}:</b> {fmt_val(c, row[c]) if isinstance(row[c], (int, float, np.integer, np.floating)) else row[c]}"
             for c in well_tip_fields if c in row.index and pd.notna(row[c])
         )
         folium.CircleMarker(
@@ -924,7 +935,7 @@ def render_map():
             color=color,
             fill=True,
             fill_color=color,
-            fill_opacity=0.95 if is_wf else 0.9,
+            fill_opacity=0.95,
             weight=1,
             tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
         ).add_to(well_fg)
@@ -1012,7 +1023,6 @@ def render_map():
     prospect_fg.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
-    # No draw tool + no returned events
     _ = st_folium(
         m,
         use_container_width=True,
@@ -1181,7 +1191,9 @@ if classification_ready and "Classification" in p.columns:
             mime="text/csv",
         )
 
+# ==========================================================
 # No-proximal
+# ==========================================================
 no_prox = p[p["_no_proximal"]]
 if not no_prox.empty:
     with st.expander(f"⚠️ {len(no_prox)} prospects with no proximal wells within {buffer_distance}m"):
