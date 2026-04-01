@@ -202,7 +202,7 @@ def load_data():
     section_df = pd.read_excel("wells.xlsx", sheet_name=1)
 
     # CRS handling
-    for gdf in [lines, points, grid, units, inv, merged, land]:
+    for gdf in [lines, points, grid, units, inv, land]:
         if gdf.crs is None:
             gdf.set_crs(epsg=26913, inplace=True)
         gdf.to_crs(epsg=26913, inplace=True)
