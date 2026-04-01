@@ -192,10 +192,8 @@ def load_data():
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
 
-    # ✅ CHANGED: merged/inf/ll combined into a single file: `inv.shp`
     inv = gpd.read_file("inv.shp")
 
-    merged = gpd.read_file("merged_inventory.shp")
 
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
@@ -262,8 +260,7 @@ def load_data():
         lines,
         points,
         grid,
-        inv,            # ✅ replaces inf/ll
-        merged,
+        inv,            
         land,
         well_df_out,
         section_df,
@@ -279,15 +276,12 @@ def load_data():
 
 (
     lines_gdf, points_gdf, grid_gdf, inv_gdf,
-    merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
+    land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
     section_enriched_4326, units_4326, land_json, units_json, proximal_wells, units_gdf
 ) = load_data()
 
-# Unifying layer gdfs
-# NOTE: we removed separate inf and lease_lines; now we treat `inv.shp` as "Infill + Lease + etc".
 LAYER_GDFS = {
     "Inventory (inv.shp)": inv_gdf,
-    "Merged": merged_gdf
 }
 
 # ==========================================================
@@ -309,11 +303,6 @@ buffer_distance = st.sidebar.slider("Buffer Distance (m)", 100, 2000, DEFAULT_BU
 
 st.sidebar.markdown("---")
 section_gradient = st.sidebar.selectbox("Section Grid Colour", ["None"] + SEC_NUMERIC_COLS)
-
-show_layers = {
-    "Inventory (inv.shp)": st.sidebar.checkbox("Inventory (inv.shp)", value=True),
-    "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
-}
 
 # Custom well management (paste box)
 st.sidebar.markdown("---")
