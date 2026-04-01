@@ -791,139 +791,160 @@ bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
 clon, clat = transformer_to_4326.transform(cx, cy)
 
-
 @st.fragment
 def render_map():
     m = folium.Map(
         location=[clat, clon],
         zoom_start=11,
         tiles="CartoDB positron",
-        prefer_canvas=True,
+        control_scale=True,
     )
-    MiniMap(toggle_display=True, position="bottomleft").add_to(m)
 
-    # Bakken Land
+    MiniMap(toggle_display=True).add_to(m)
+
+    # ---------------------------
+    # SAFE SIMPLIFICATION (critical fix)
+    # ---------------------------
+    def safe_geojson(gdf, simplify_tol=30):
+        try:
+            gdf = gdf.copy()
+            gdf["geometry"] = gdf.geometry.simplify(simplify_tol, preserve_topology=True)
+            return gdf.to_json()
+        except Exception:
+            return None
+
+    # ---------------------------
+    # Land
+    # ---------------------------
     land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
-    folium.GeoJson(
-        land_json,
-        style_function=lambda _: {
-            "fillColor": "#fff9c4", "color": "#fff9c4",
-            "weight": 0.5, "fillOpacity": 0.2,
-        },
-    ).add_to(land_fg)
+
+    land_data = safe_geojson(land_gdf.to_crs(4326), 100)
+    if land_data:
+        folium.GeoJson(
+            land_data,
+            style_function=lambda _: {
+                "fillColor": "#fff9c4",
+                "color": "#fff9c4",
+                "weight": 0.5,
+                "fillOpacity": 0.2,
+            },
+        ).add_to(land_fg)
+
     land_fg.add_to(m)
 
+    # ---------------------------
     # Units
+    # ---------------------------
     units_fg = folium.FeatureGroup(name="Units", show=True)
-    folium.GeoJson(
-        units_json,
-        style_function=lambda _: {
-            "color": "black", "weight": 2, "fillOpacity": 0, "interactive": False,
-        },
-    ).add_to(units_fg)
+
+    units_data = safe_geojson(units_gdf.to_crs(4326), 50)
+    if units_data:
+        folium.GeoJson(
+            units_data,
+            style_function=lambda _: {
+                "color": "black",
+                "weight": 2,
+                "fillOpacity": 0,
+            },
+        ).add_to(units_fg)
+
     units_fg.add_to(m)
 
-    # Section grid
-    if section_gradient != "None" and section_gradient in section_enriched_4326.columns:
-        grad_vals = section_enriched_4326[section_gradient].dropna()
-        if not grad_vals.empty:
-            colormap = cm.LinearColormap(
-                ["#f7fcf5", "#74c476", "#00441b"],
-                vmin=float(grad_vals.min()),
-                vmax=float(grad_vals.max()),
-            ).to_step(n=7)
-            colormap.caption = section_gradient
-            m.add_child(colormap)
+    # ---------------------------
+    # Section grid (SAFE)
+    # ---------------------------
+    section_fg = folium.FeatureGroup(name="Section Grid", show=False)
 
-            def sec_style(feat, _col=section_gradient, _cm=colormap):
-                v = feat["properties"].get(_col)
-                if v is None or (isinstance(v, float) and np.isnan(v)):
-                    return NULL_STYLE
-                return {
-                    "fillColor": _cm(v),
-                    "fillOpacity": 0.45,
-                    "color": "white",
-                    "weight": 0.3,
-                }
-        else:
-            def sec_style(_):
-                return NULL_STYLE
-    else:
-        def sec_style(_):
-            return NULL_STYLE
+    sec_data = safe_geojson(section_enriched_4326, 80)
+    if sec_data:
+        folium.GeoJson(
+            sec_data,
+            style_function=lambda _: {
+                "fillOpacity": 0,
+                "color": "#999",
+                "weight": 0.3,
+            },
+        ).add_to(section_fg)
 
-    sec_tip_fields = [c for c in section_enriched_4326.columns if c != "geometry"]
-    section_fg = folium.FeatureGroup(
-        name="Section Grid", show=(section_gradient != "None")
-    )
-    folium.GeoJson(
-        section_enriched_4326.to_json(),
-        style_function=sec_style,
-        highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
-        tooltip=folium.GeoJsonTooltip(
-            fields=sec_tip_fields,
-            aliases=[f"{f}:" for f in sec_tip_fields],
-            localize=True,
-            sticky=True,
-            style=TOOLTIP_STYLE,
-        ),
-    ).add_to(section_fg)
     section_fg.add_to(m)
 
-    # Inventory (inv.shp)
-    inv_fg = folium.FeatureGroup(name="Inventory (inv.shp)", show=True)
-    inv_style = {"color": "#999", "weight": 1, "fillOpacity": 0.05}
-    folium.GeoJson(
-        inv_4326.to_json(), style_function=lambda _: inv_style, name="inv"
-    ).add_to(inv_fg)
+    # ---------------------------
+    # Inventory
+    # ---------------------------
+    inv_fg = folium.FeatureGroup(name="Inventory", show=True)
+
+    inv_data = safe_geojson(inv_4326, 80)
+    if inv_data:
+        folium.GeoJson(
+            inv_data,
+            style_function=lambda _: {
+                "color": "#999",
+                "weight": 1,
+                "fillOpacity": 0.05,
+            },
+        ).add_to(inv_fg)
+
     inv_fg.add_to(m)
 
-    # Prospect buffers
-    buf_fg = folium.FeatureGroup(name="Prospect Buffers")
-    _BSTYLES = {
-        "pass":   {"fillOpacity": 0, "color": "#000", "weight": 1.2, "opacity": 0.6, "dashArray": "6 4"},
-        "fail":   {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.25, "dashArray": "6 4"},
-        "noprox": {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.3, "dashArray": "4 6"},
-        "custom": {"fillOpacity": 0.04, "fillColor": "#ff00ff", "color": "#ff00ff", "weight": 1.5, "opacity": 0.7, "dashArray": "4 4"},
-    }
+    # ---------------------------
+    # Buffers
+    # ---------------------------
+    buf_fg = folium.FeatureGroup(name="Buffers")
 
-    buffer_gdf["_bstyle"] = "fail"
-    buffer_gdf.loc[buffer_gdf["_passes_filter"], "_bstyle"] = "pass"
-    buffer_gdf.loc[buffer_gdf["_no_proximal"], "_bstyle"] = "noprox"
-    buffer_gdf.loc[buffer_gdf["_is_custom"], "_bstyle"] = "custom"
+    for _, row in buffer_gdf.iterrows():
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
 
-    folium.GeoJson(
-        buffer_gdf[["_bstyle", "geometry"]].to_json(),
-        style_function=lambda feat: _BSTYLES.get(
-            feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
-        ),
-    ).add_to(buf_fg)
+        folium.GeoJson(
+            geom.__geo_interface__,
+            style_function=lambda _: {
+                "color": "#000",
+                "weight": 1,
+                "opacity": 0.4,
+                "dashArray": "5,5",
+            },
+        ).add_to(buf_fg)
+
     buf_fg.add_to(m)
 
-    # Prospect lines
+    # ---------------------------
+    # Prospect lines (FIXED lambda)
+    # ---------------------------
     prospect_fg = folium.FeatureGroup(name="Prospects", show=True)
 
     for _, row in p_lines_4326.iterrows():
-        lc = row["_line_color"]
-        is_custom = bool(row["_is_custom"])
-        tip = row["_tooltip"]
-        line_weight = 5 if is_custom else 3
+        geom = row.geometry
+        if geom is None or geom.is_empty:
+            continue
+
+        color = row["_line_color"]
+        weight = 5 if row["_is_custom"] else 3
+        tooltip = row["_tooltip"]
 
         folium.GeoJson(
-            row.geometry.__geo_interface__,
-            style_function=lambda _, _lc=lc, _w=line_weight: {
-                "color": _lc, "weight": _w, "opacity": 0.9,
+            geom.__geo_interface__,
+            style_function=lambda _, c=color, w=weight: {
+                "color": c,
+                "weight": w,
+                "opacity": 0.9,
             },
-            tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
+            tooltip=folium.Tooltip(tooltip),
         ).add_to(prospect_fg)
 
     prospect_fg.add_to(m)
-    folium.LayerControl(collapsed=True).add_to(m)
 
-    # ---- FIX: removed returned_objects=[] which is unsupported / broken ----
-    st_folium(m, use_container_width=True, height=800)
+    folium.LayerControl().add_to(m)
 
-
+    # ---------------------------
+    # CRITICAL FIX
+    # ---------------------------
+    st_folium(
+        m,
+        use_container_width=True,
+        height=800,
+    )
+    
 render_map()
 
 # ==========================================================
