@@ -424,8 +424,9 @@ prospects["_is_custom"] = prospects["_is_custom"].fillna(False).astype(bool)
 custom_mask_label = prospects["_is_custom"]
 
 if "Label" not in prospects.columns:
-    prospects["Label"] = np.nan
-prospects["_label_is_section"] = False
+    prospects["Label"] = None
+
+prospects["Label"] = prospects["Label"].astype("object")
 
 if "UWI" in prospects.columns:
     non_custom_mask = ~custom_mask_label
