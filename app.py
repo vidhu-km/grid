@@ -689,7 +689,7 @@ for col in ALL_METRIC_COLS:
     f_lo, f_hi = st.sidebar.slider(col, lo, hi, (lo, hi), key=f"filter_{col}")
     filter_mask &= ((p[col] >= f_lo) & (p[col] <= f_hi)) | p[col].isna()
 
-p["_passes_filter"] = filter_mask
+p["_passes_filter"] = filter_mask.fillna(False)
 p["_no_proximal"] = ~has_proximal
 
 n_total, n_passing = len(p), int(filter_mask.sum())
