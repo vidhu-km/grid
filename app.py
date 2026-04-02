@@ -3,7 +3,7 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 import folium
-from folium.plugins import MiniMap  # Draw removed
+from folium.plugins import MiniMap
 from streamlit_folium import st_folium
 import branca.colormap as cm
 from shapely.geometry import Point, LineString
@@ -148,12 +148,11 @@ def _coords_key(coords):
     return tuple(tuple(round(c, 6) for c in pt) for pt in coords)
 
 
-# ---- New: paste parser (EPSG:4326 lon,lat) ----
+# ---- Paste parser (EPSG:4326 lon,lat) ----
 def parse_coord_line(line: str):
     line = line.strip()
     if not line:
         return None
-    # Accept "lon,lat" or "lon lat"
     line = line.replace(";", " ").replace(",", " ")
     parts = [p for p in line.split() if p]
     if len(parts) < 2:
@@ -184,7 +183,6 @@ def parse_wells_from_text(text: str):
     if current:
         wells.append(current)
 
-    # keep only wells with >=2 points
     wells = [w for w in wells if len(w) >= 2]
     return wells
 
@@ -196,15 +194,13 @@ def load_data():
     lines = gpd.read_file("lines.shp")
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
-    infills = gpd.read_file("inf.shp")
-    merged = gpd.read_file("merged_inventory.shp")
-    lease_lines = gpd.read_file("ll.shp")
+    inv = gpd.read_file("inv.shp")  # Single combined prospect shapefile
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
     well_df = pd.read_excel("wells.xlsx", sheet_name=0)
     section_df = pd.read_excel("wells.xlsx", sheet_name=1)
 
-    for gdf in [lines, points, grid, units, infills, lease_lines, merged, land]:
+    for gdf in [lines, points, grid, units, inv, land]:
         if gdf.crs is None:
             gdf.set_crs(epsg=26913, inplace=True)
         gdf.to_crs(epsg=26913, inplace=True)
@@ -256,20 +252,18 @@ def load_data():
     )
     proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
-    return (lines, points, grid, units, infills, lease_lines, merged, land,
+    return (lines, points, grid, units, inv, land,
             well_df_out, section_df, sec_numeric_cols,
             grid_enriched, section_4326, units_4326, land_4326,
             land_json, units_json, proximal_wells)
 
 
 (
-    lines_gdf, points_gdf, grid_gdf, units_gdf, infills_gdf, lease_lines_gdf,
-    merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
+    lines_gdf, points_gdf, grid_gdf, units_gdf, inv_gdf,
+    land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
     section_enriched, section_4326, units_4326, land_4326,
     land_json, units_json, proximal_wells
 ) = load_data()
-
-LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
 
 # ==========================================================
 # Session state
@@ -291,11 +285,7 @@ buffer_distance = st.sidebar.slider("Buffer Distance (m)", 100, 2000, DEFAULT_BU
 st.sidebar.markdown("---")
 section_gradient = st.sidebar.selectbox("Section Grid Colour", ["None"] + SEC_NUMERIC_COLS)
 
-show_layers = {
-    "Infill": st.sidebar.checkbox("Unit Infills", value=True),
-    "Lease Line": st.sidebar.checkbox("Unit Lease Lines", value=True),
-    "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
-}
+show_inventory = st.sidebar.checkbox("Prospect Inventory", value=True)
 
 # Custom well management (now via paste box)
 st.sidebar.markdown("---")
@@ -380,12 +370,11 @@ else:
 # Build prospect set
 # ==========================================================
 prospect_frames = []
-for name, enabled in show_layers.items():
-    if enabled:
-        f = LAYER_GDFS[name].copy()
-        f["_prospect_type"] = name
-        f["_is_custom"] = False
-        prospect_frames.append(f)
+if show_inventory:
+    f = inv_gdf.copy()
+    f["_prospect_type"] = "Inventory"
+    f["_is_custom"] = False
+    prospect_frames.append(f)
 
 if st.session_state.drawn_wells:
     tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
@@ -406,12 +395,12 @@ if st.session_state.drawn_wells:
         prospect_frames.append(custom_gdf)
 
 if not prospect_frames:
-    st.error("Enable at least one prospect layer.")
+    st.error("Enable the prospect inventory or add custom wells.")
     st.stop()
 
 prospects = gpd.GeoDataFrame(
     pd.concat(prospect_frames, ignore_index=True),
-    geometry="geometry", crs=infills_gdf.crs,
+    geometry="geometry", crs=inv_gdf.crs,
 )
 
 if "_is_custom" not in prospects.columns:
@@ -468,15 +457,16 @@ if unnamed_mask.any():
             prospects.at[row["_pidx"], "Label"] = str(row["Section"]).strip()
             prospects.at[row["_pidx"], "_label_is_section"] = True
 
-    section_labeled = prospects[prospects["_label_is_section"]]
-    dupe_labels = section_labeled["Label"].value_counts()
-    dupe_labels = dupe_labels[dupe_labels > 1].index
+    section_labeled = prospects[prospects.get("_label_is_section", pd.Series(False, index=prospects.index)).fillna(False).astype(bool)]
+    if not section_labeled.empty:
+        dupe_labels = section_labeled["Label"].value_counts()
+        dupe_labels = dupe_labels[dupe_labels > 1].index
 
-    for section_name in dupe_labels:
-        idxs = section_labeled[section_labeled["Label"] == section_name].index
-        suffix_gen = _suffix_generator()
-        for pidx in idxs:
-            prospects.at[pidx, "Label"] = f"{section_name}-{next(suffix_gen)}"
+        for section_name in dupe_labels:
+            idxs = section_labeled[section_labeled["Label"] == section_name].index
+            suffix_gen = _suffix_generator()
+            for pidx in idxs:
+                prospects.at[pidx, "Label"] = f"{section_name}-{next(suffix_gen)}"
 
 prospects["Label"] = prospects["Label"].fillna("")
 
@@ -702,6 +692,11 @@ n_custom = int(p["_is_custom"].sum())
 transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 existing_display = proximal_wells.to_crs(4326)
 
+# Flag wells with WF > 0 for blue colouring
+existing_display["_wf_positive"] = (
+    existing_display["WF"].notna() & (existing_display["WF"] > 0)
+)
+
 
 def _build_tooltip_html(row):
     parts = []
@@ -779,7 +774,7 @@ st.caption(
 )
 
 # ==========================================================
-# MAP — no Draw tool, no returned events
+# MAP
 # ==========================================================
 bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
@@ -859,13 +854,14 @@ def render_map():
     ).add_to(section_fg)
     section_fg.add_to(m)
 
-    # ── Existing Wells ──
+    # ── Existing Wells (with WF>0 coloured blue) ──
     well_fg = folium.FeatureGroup(name="Existing Wells")
     line_wells = existing_display[existing_display.geometry.type != "Point"]
     point_wells = existing_display[existing_display.geometry.type == "Point"]
-    well_tip_fields = [c for c in existing_display.columns if c not in ("geometry", "_midpoint")]
+    well_tip_fields = [c for c in existing_display.columns if c not in ("geometry", "_midpoint", "_wf_positive")]
 
     if not line_wells.empty:
+        # Invisible wide hitbox for tooltips
         folium.GeoJson(
             line_wells[well_tip_fields + ["geometry"]].to_json(),
             style_function=lambda _: {"color": "transparent", "weight": 15, "opacity": 0},
@@ -879,40 +875,52 @@ def render_map():
             ),
         ).add_to(well_fg)
 
+        # Draw each line well individually to apply WF>0 colouring
         line_clean = line_wells.drop(columns=["_midpoint"], errors="ignore")
         for c in line_clean.columns:
-            if c != "geometry" and line_clean[c].dtype == object:
+            if c != "geometry" and c != "_wf_positive" and line_clean[c].dtype == object:
                 line_clean[c] = line_clean[c].astype(str)
-        folium.GeoJson(
-            line_clean.to_json(),
-            style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
-        ).add_to(well_fg)
 
-        for _, row in line_wells.iterrows():
+        for _, row in line_clean.iterrows():
+            is_blue = row.get("_wf_positive", False)
+            well_color = "#2196F3" if is_blue else "black"
+            well_weight = 1.5 if is_blue else 0.5
+            well_opacity = 1.0 if is_blue else 0.8
+
+            folium.GeoJson(
+                row.geometry.__geo_interface__,
+                style_function=lambda _, _c=well_color, _w=well_weight, _o=well_opacity: {
+                    "color": _c, "weight": _w, "opacity": _o
+                },
+            ).add_to(well_fg)
+
             ep = endpoint_of_geom(row.geometry)
             if ep:
                 folium.CircleMarker(
                     [ep.y, ep.x],
-                    radius=1,
-                    color="black",
+                    radius=2 if is_blue else 1,
+                    color=well_color,
                     fill=True,
-                    fill_color="black",
-                    fill_opacity=0.8,
+                    fill_color=well_color,
+                    fill_opacity=1.0 if is_blue else 0.8,
                     weight=1,
                 ).add_to(well_fg)
 
     for _, row in point_wells.iterrows():
+        is_blue = row.get("_wf_positive", False)
+        well_color = "#2196F3" if is_blue else "black"
+
         tip = "<br>".join(
             f"<b>{c}:</b> {fmt_val(c, row[c]) if isinstance(row[c], (int, float)) else row[c]}"
             for c in well_tip_fields if c in row.index and pd.notna(row[c])
         )
         folium.CircleMarker(
             [row.geometry.y, row.geometry.x],
-            radius=2,
-            color="black",
+            radius=3 if is_blue else 2,
+            color=well_color,
             fill=True,
-            fill_color="black",
-            fill_opacity=0.9,
+            fill_color=well_color,
+            fill_opacity=1.0 if is_blue else 0.9,
             weight=1,
             tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
         ).add_to(well_fg)
@@ -999,7 +1007,6 @@ def render_map():
     prospect_fg.add_to(m)
     folium.LayerControl(collapsed=True).add_to(m)
 
-    # No draw tool + no returned events
     _ = st_folium(
         m,
         use_container_width=True,
