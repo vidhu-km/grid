@@ -655,7 +655,6 @@ else:
                 )
 
                 for col in ["Classification", "Productivity_Z", "Resource_Z", "Z_EUR", "Z_IP90", "Z_1Y"]:
-                    prospects[col] = np.nan
                     prospects.loc[pros_cls.index, col] = pros_cls[col]
 
                 classification_ready = True
