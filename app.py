@@ -2,46 +2,45 @@ import streamlit as st
 import geopandas as gpd
 import pandas as pd
 import numpy as np
+import folium
+from folium.plugins import MiniMap  # Draw removed
+from streamlit_folium import st_folium
+import branca.colormap as cm
 from shapely.geometry import Point, LineString
 from pyproj import Transformer
+import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.linear_model import LinearRegression, RANSACRegressor
-import streamlit.components.v1 as components
+import string
 
-# -----------------------------
-# UI / Theme
-# -----------------------------
+# ==========================================================
+# Page config & Constants
+# ==========================================================
 st.set_page_config(layout="wide", page_title="Inventory Classifier", page_icon="🛢️")
-
-st.markdown("""
-<style>
-    [data-testid="stSidebar"] {background-color: #0e1117;}
-    [data-testid="stSidebar"] * {color: #fafafa;}
-    section[data-testid="stSidebar"] .stSlider label,
-    section[data-testid="stSidebar"] .stSelectbox label,
-    section[data-testid="stSidebar"] .stNumberInput label {font-size: 0.85rem;}
-    .stDataFrame {border: 1px solid #333; border-radius: 6px;}
-    div[data-testid="stMetric"] {background: #161b22; padding: 12px 16px; border-radius: 8px; border: 1px solid #30363d;}
-    div[data-testid="stMetric"] label {color: #8b949e !important; font-size: 0.8rem;}
-    div[data-testid="stMetric"] [data-testid="stMetricValue"] {color: #58a6ff !important; font-size: 1.6rem;}
-</style>
-""", unsafe_allow_html=True)
 
 NULL_STYLE = {"fillColor": "#ffffff", "fillOpacity": 0, "color": "#888", "weight": 0.25}
 DEFAULT_BUFFER_M = 900
+
 COLOR_MAP_CLASS = {
     "High Prod / High Resource": "#2ca02c",
-    "Low Prod / High Resource": "#ff7f0e",
-    "High Prod / Low Resource": "#1f77b4",
-    "Low Prod / Low Resource": "#d62728",
+    "Low Prod / High Resource":  "#ff7f0e",
+    "High Prod / Low Resource":  "#1f77b4",
+    "Low Prod / Low Resource":   "#d62728",
 }
+
 WELL_COLS = ["Norm EUR", "Norm 1Y Cuml", "Norm IP90"]
 SUM_COLS = ["WF", "FOOZ"]
 SECTION_OOIP_COL = "SectionOOIP"
 SECTION_ROIP_COL = "SectionROIP"
 ALL_METRIC_COLS = WELL_COLS + SUM_COLS + [SECTION_OOIP_COL, SECTION_ROIP_COL]
+TOOLTIP_STYLE = (
+    "font-size:11px;padding:3px 6px;background:rgba(255,255,255,0.92);"
+    "border:1px solid #333;border-radius:3px;"
+)
 
-
+# ==========================================================
+# Helpers
+# ==========================================================
 def safe_range(series):
     vals = series.replace([np.inf, -np.inf], np.nan).dropna()
     if vals.empty:
@@ -55,11 +54,12 @@ def safe_range(series):
 def midpoint_of_geom(geom):
     if geom is None or geom.is_empty:
         return None
-    if geom.geom_type == "LineString":
+    t = geom.geom_type
+    if t == "LineString":
         return geom.interpolate(0.5, normalized=True)
-    if geom.geom_type == "MultiLineString":
+    if t == "MultiLineString":
         return max(geom.geoms, key=lambda g: g.length).interpolate(0.5, normalized=True)
-    if geom.geom_type == "Point":
+    if t == "Point":
         return geom
     return geom.centroid
 
@@ -67,11 +67,12 @@ def midpoint_of_geom(geom):
 def startpoint_of_geom(geom):
     if geom is None or geom.is_empty:
         return None
-    if geom.geom_type == "LineString":
+    t = geom.geom_type
+    if t == "LineString":
         return Point(geom.coords[0])
-    if geom.geom_type == "MultiLineString":
+    if t == "MultiLineString":
         return Point(geom.geoms[0].coords[0])
-    if geom.geom_type == "Point":
+    if t == "Point":
         return geom
     return None
 
@@ -79,11 +80,12 @@ def startpoint_of_geom(geom):
 def endpoint_of_geom(geom):
     if geom is None or geom.is_empty:
         return None
-    if geom.geom_type == "LineString":
+    t = geom.geom_type
+    if t == "LineString":
         return Point(geom.coords[-1])
-    if geom.geom_type == "MultiLineString":
+    if t == "MultiLineString":
         return Point(geom.geoms[-1].coords[-1])
-    if geom.geom_type == "Point":
+    if t == "Point":
         return geom
     return None
 
@@ -125,25 +127,49 @@ def fmt_val(col, v):
     return f"{v:,.0f}" if abs(v) > 100 else f"{v:.3f}"
 
 
+def _suffix_generator():
+    n = 1
+    while True:
+        if n == 1:
+            yield from string.ascii_uppercase
+        else:
+            for combo in _alpha_combos(n):
+                yield combo
+        n += 1
+
+
+def _alpha_combos(length):
+    if length == 1:
+        return list(string.ascii_uppercase)
+    return [b + c for b in _alpha_combos(length - 1) for c in string.ascii_uppercase]
+
+
 def _coords_key(coords):
     return tuple(tuple(round(c, 6) for c in pt) for pt in coords)
 
 
+# ---- New: paste parser (EPSG:4326 lon,lat) ----
 def parse_coord_line(line: str):
-    line = line.strip().replace(";", " ").replace(",", " ")
+    line = line.strip()
     if not line:
         return None
+    # Accept "lon,lat" or "lon lat"
+    line = line.replace(";", " ").replace(",", " ")
     parts = [p for p in line.split() if p]
     if len(parts) < 2:
         return None
-    try:
-        return float(parts[0]), float(parts[1])
-    except (ValueError, IndexError):
-        return None
+    lon = float(parts[0])
+    lat = float(parts[1])
+    return lon, lat
 
 
 def parse_wells_from_text(text: str):
-    wells, current = [], []
+    """
+    Multiple wells separated by blank lines.
+    Each well: >=2 lines of "lon,lat".
+    """
+    wells = []
+    current = []
     for raw in text.splitlines():
         line = raw.strip()
         if not line:
@@ -152,50 +178,33 @@ def parse_wells_from_text(text: str):
                 current = []
             continue
         parsed = parse_coord_line(line)
-        if parsed:
-            current.append(parsed)
+        if parsed is None:
+            continue
+        current.append(parsed)
     if current:
         wells.append(current)
-    return [w for w in wells if len(w) >= 2]
 
+    # keep only wells with >=2 points
+    wells = [w for w in wells if len(w) >= 2]
+    return wells
 
-@st.cache_resource(show_spinner="Loading spatial data…")
+# ==========================================================
+# Load data (cached)
+# ==========================================================
+@st.cache_resource(show_spinner="Loading spatial data …")
 def load_data():
-    import os
-    required_files = {
-        "lines.shp": "Wellbore lateral lines",
-        "points.shp": "Well surface locations",
-        "ooipsectiongrid.shp": "Section grid with OOIP",
-        "inv.shp": "Inventory polygons",
-        "Bakken Units.shp": "Unit boundaries",
-        "Bakken Land.shp": "Land grid",
-        "wells.xlsx": "Well & section metrics",
-    }
-    missing = []
-    for fname, desc in required_files.items():
-        if not os.path.exists(fname):
-            if fname.endswith(".shp"):
-                stem = fname[:-4]
-                if not any(os.path.exists(stem + ext) for ext in [".dbf", ".shx", ".prj"]):
-                    missing.append(f"{fname}  ({desc})")
-            else:
-                missing.append(f"{fname}  ({desc})")
-    if missing:
-        st.error("**Missing required data files:**\n\n" + "\n".join(f"• `{f}`" for f in missing))
-        st.stop()
-
     lines = gpd.read_file("lines.shp")
     points = gpd.read_file("points.shp")
     grid = gpd.read_file("ooipsectiongrid.shp")
-    inv = gpd.read_file("inv.shp")
+    infills = gpd.read_file("inf.shp")
+    merged = gpd.read_file("merged_inventory.shp")
+    lease_lines = gpd.read_file("ll.shp")
     units = gpd.read_file("Bakken Units.shp")
     land = gpd.read_file("Bakken Land.shp")
+    well_df = pd.read_excel("wells.xlsx", sheet_name=0)
+    section_df = pd.read_excel("wells.xlsx", sheet_name=1)
 
-    xls = pd.ExcelFile("wells.xlsx")
-    well_df = pd.read_excel(xls, sheet_name=0)
-    section_df = pd.read_excel(xls, sheet_name=1)
-
-    for gdf in [lines, points, grid, units, inv, land]:
+    for gdf in [lines, points, grid, units, infills, lease_lines, merged, land]:
         if gdf.crs is None:
             gdf.set_crs(epsg=26913, inplace=True)
         gdf.to_crs(epsg=26913, inplace=True)
@@ -224,92 +233,119 @@ def load_data():
 
     well_df_out = well_df.merge(
         section_df[["Section", SECTION_OOIP_COL, SECTION_ROIP_COL]],
-        on="Section",
-        how="left"
+        on="Section", how="left",
     )
-    grid_enriched = grid.merge(section_df, on="Section", how="left")
 
+    grid_enriched = grid.merge(section_df, on="Section", how="left")
     section_4326 = grid_enriched.to_crs(4326)
     units_4326 = units.to_crs(4326)
+    land_4326 = land.to_crs(4326)
 
-    lines_with_uwi = lines[["UWI", "geometry"]].copy()
-    points_only = points[~points["UWI"].isin(lines_with_uwi["UWI"])][["UWI", "geometry"]].copy()
+    land_json = land_4326.to_json()
+    units_json = units_4326.to_json()
 
+    lines_with_uwi = lines[["UWI", "geometry"]]
+    points_only = points[~points["UWI"].isin(lines_with_uwi["UWI"])][["UWI", "geometry"]]
     existing_wells = gpd.GeoDataFrame(
         pd.concat([lines_with_uwi, points_only], ignore_index=True),
-        geometry="geometry",
-        crs=lines.crs
+        geometry="geometry", crs=lines.crs,
     )
-
     proximal_wells = gpd.GeoDataFrame(
         existing_wells.merge(well_df_out, on="UWI", how="inner"),
-        geometry="geometry",
-        crs=existing_wells.crs
+        geometry="geometry", crs=existing_wells.crs,
     )
     proximal_wells["_midpoint"] = proximal_wells.geometry.apply(midpoint_of_geom)
 
-    return (lines, points, grid, inv, land, well_df_out, section_df,
-            sec_numeric_cols, section_4326, units_4326, proximal_wells, units)
+    return (lines, points, grid, units, infills, lease_lines, merged, land,
+            well_df_out, section_df, sec_numeric_cols,
+            grid_enriched, section_4326, units_4326, land_4326,
+            land_json, units_json, proximal_wells)
 
 
-(_lines_gdf, _points_gdf, grid_gdf, inv_gdf, land_gdf, well_df, section_df,
- SEC_NUMERIC_COLS, section_enriched_4326, units_gdf, proximal_wells, units_gdf_raw) = load_data()
+(
+    lines_gdf, points_gdf, grid_gdf, units_gdf, infills_gdf, lease_lines_gdf,
+    merged_gdf, land_gdf, well_df, section_df, SEC_NUMERIC_COLS,
+    section_enriched, section_4326, units_4326, land_4326,
+    land_json, units_json, proximal_wells
+) = load_data()
 
-# -----------------------------
-# Custom Wells in sidebar
-# -----------------------------
+LAYER_GDFS = {"Infill": infills_gdf, "Lease Line": lease_lines_gdf, "Merged": merged_gdf}
+
+# ==========================================================
+# Session state
+# ==========================================================
 if "drawn_wells" not in st.session_state:
     st.session_state.drawn_wells = []
 if "drawn_coords_set" not in st.session_state:
     st.session_state.drawn_coords_set = set()
+if "last_drawing_hash" not in st.session_state:
+    st.session_state.last_drawing_hash = None
 
-st.sidebar.title("⚙️ Settings")
+# ==========================================================
+# Sidebar
+# ==========================================================
+st.sidebar.title("Settings")
 
 buffer_distance = st.sidebar.slider("Buffer Distance (m)", 100, 2000, DEFAULT_BUFFER_M, step=50)
+
 st.sidebar.markdown("---")
 section_gradient = st.sidebar.selectbox("Section Grid Colour", ["None"] + SEC_NUMERIC_COLS)
 
+show_layers = {
+    "Infill": st.sidebar.checkbox("Unit Infills", value=True),
+    "Lease Line": st.sidebar.checkbox("Unit Lease Lines", value=True),
+    "Merged": st.sidebar.checkbox("Mosaic Merged Inventory", value=True),
+}
+
+# Custom well management (now via paste box)
 st.sidebar.markdown("---")
 st.sidebar.subheader("✏️ Custom Wells")
+st.sidebar.caption("Paste lon/lat coordinates from the URL below.")
 st.sidebar.markdown(
     '<a href="https://vidhu-km.github.io/invdraw/" target="_blank">'
-    '<button style="width:100%;padding:10px;background:linear-gradient(135deg,#4a90d9,#357abd);color:white;'
-    'border:none;border-radius:6px;font-size:14px;cursor:pointer;font-weight:600;">'
-    '🔗 Open Coordinate Selector</button></a>',
+    '<button style="width:100%;padding:8px;background-color:#4a90d9;color:white;'
+    'border:none;border-radius:5px;font-size:14px;cursor:pointer;">'
+    '🔗 Select Sections Here</button></a>',
     unsafe_allow_html=True,
 )
-st.sidebar.caption("Paste EPSG:4326 `lon,lat` per line. Blank line separates wells.")
+
+# ---- Paste box ----
+st.sidebar.subheader("📌 Paste Coordinates (lon,lat)")
+st.sidebar.caption(
+    "Use EPSG:4326 (WGS84). Format: `lon,lat` per line. "
+    "Blank line separates wells."
+)
 
 coords_text = st.sidebar.text_area(
-    "Coordinates",
+    "Pasted coords",
     height=150,
-    placeholder="-103.2345,48.0123\n-103.2330,48.0130\n\n-103.2200,48.0200\n-103.2150,48.0220",
+    placeholder=(
+        "-103.2345,48.0123\n"
+        "-103.2330,48.0130\n"
+        "\n"
+        "-103.2200,48.0200\n"
+        "-103.2150,48.0220"
+    ),
     key="coords_text",
 )
 
-if st.sidebar.button("➕ Add Custom Wells", type="primary"):
+if st.sidebar.button("➕ Add to Custom Wells", type="primary"):
     wells = parse_wells_from_text(coords_text)
     if not wells:
-        st.sidebar.warning("No valid wells found. Need ≥2 points per well.")
+        st.sidebar.warning("No valid wells found. Need at least 2 points per well.")
     else:
-        tf = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
-        added = 0
         for wcoords in wells:
             coord_list = [(float(lon), float(lat)) for lon, lat in wcoords]
             key = _coords_key(coord_list)
-            if key not in st.session_state.drawn_coords_set:
-                st.session_state.drawn_coords_set.add(key)
-                st.session_state.drawn_wells.append({"coords": coord_list, "label": None})
-                added += 1
-        if added:
-            st.toast(f"{added} well(s) added.", icon="✅")
-        else:
-            st.toast("All wells already exist.", icon="ℹ️")
+            if key in st.session_state.drawn_coords_set:
+                continue
+            st.session_state.drawn_coords_set.add(key)
+            st.session_state.drawn_wells.append({"coords": coord_list, "label": None})
+        st.toast("Custom well(s) added.", icon="✅")
         st.rerun()
 
+# Edit/delete existing custom wells
 if st.session_state.drawn_wells:
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("Manage Wells")
     wells_to_delete = []
     for i, cw in enumerate(st.session_state.drawn_wells):
         col_lbl, col_del = st.sidebar.columns([3, 1])
@@ -328,7 +364,8 @@ if st.session_state.drawn_wells:
     if wells_to_delete:
         for idx in sorted(wells_to_delete, reverse=True):
             cw = st.session_state.drawn_wells[idx]
-            st.session_state.drawn_coords_set.discard(_coords_key(cw["coords"]))
+            key = _coords_key(cw["coords"])
+            st.session_state.drawn_coords_set.discard(key)
             st.session_state.drawn_wells.pop(idx)
         st.rerun()
 
@@ -339,52 +376,112 @@ if st.session_state.drawn_wells:
 else:
     st.sidebar.info("No custom wells added yet.")
 
-# -----------------------------
-# Build prospects from custom wells
-# -----------------------------
-tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
-prospects_rows = []
+# ==========================================================
+# Build prospect set
+# ==========================================================
+prospect_frames = []
+for name, enabled in show_layers.items():
+    if enabled:
+        f = LAYER_GDFS[name].copy()
+        f["_prospect_type"] = name
+        f["_is_custom"] = False
+        prospect_frames.append(f)
 
 if st.session_state.drawn_wells:
+    tf_to_proj = Transformer.from_crs("EPSG:4326", "EPSG:26913", always_xy=True)
+    custom_rows = []
     for i, cw in enumerate(st.session_state.drawn_wells):
         coords_proj = [tf_to_proj.transform(lon, lat) for lon, lat in cw["coords"]]
         if len(coords_proj) >= 2:
-            prospects_rows.append({
-                "geometry": LineString(coords_proj),
+            line = LineString(coords_proj)
+            lbl = cw.get("label") or f"Custom-{i+1}"
+            custom_rows.append({
+                "geometry": line,
                 "_prospect_type": "Custom",
                 "_is_custom": True,
-                "Label": cw.get("label") or f"Custom-{i+1}",
+                "Label": lbl,
             })
+    if custom_rows:
+        custom_gdf = gpd.GeoDataFrame(custom_rows, crs="EPSG:26913")
+        prospect_frames.append(custom_gdf)
 
-if not prospects_rows:
-    st.title("🛢️ Inventory Classifier")
-    st.info("Add at least one custom well (2+ points) via the sidebar to begin analysis.")
+if not prospect_frames:
+    st.error("Enable at least one prospect layer.")
     st.stop()
 
-prospects = gpd.GeoDataFrame(prospects_rows, geometry="geometry", crs="EPSG:26913")
-prospects["_is_custom"] = True
-prospects["_label_is_section"] = False
-if "Label" not in prospects.columns:
-    prospects["Label"] = ""
+prospects = gpd.GeoDataFrame(
+    pd.concat(prospect_frames, ignore_index=True),
+    geometry="geometry", crs=infills_gdf.crs,
+)
 
-# assign section label by endpoint
-ep_series = prospects.geometry.apply(endpoint_of_geom)
-valid_ep = ep_series.notna()
-if valid_ep.any():
-    ep_gdf = gpd.GeoDataFrame(
-        {"_pidx": ep_series[valid_ep].index, "geometry": ep_series[valid_ep].values},
-        crs=prospects.crs
+if "_is_custom" not in prospects.columns:
+    prospects["_is_custom"] = False
+prospects["_is_custom"] = prospects["_is_custom"].fillna(False).astype(bool)
+
+# ==========================================================
+# Label prospects
+# ==========================================================
+custom_mask_label = prospects["_is_custom"]
+
+if "Label" not in prospects.columns:
+    prospects["Label"] = np.nan
+prospects["_label_is_section"] = False
+
+if "UWI" in prospects.columns:
+    non_custom_mask = ~custom_mask_label
+    uwi_vals = (
+        prospects.loc[non_custom_mask, "UWI"]
+        .astype(str).str.strip()
+        .replace({"": np.nan, "nan": np.nan})
     )
-    joined = gpd.sjoin(ep_gdf, grid_gdf[["Section", "geometry"]], how="left", predicate="within")
-    for _, r in joined.dropna(subset=["Section"]).iterrows():
-        prospects.at[r["_pidx"], "Label"] = str(r["Section"]).strip()
-        prospects.at[r["_pidx"], "_label_is_section"] = True
+    prospects.loc[non_custom_mask, "Label"] = prospects.loc[non_custom_mask, "Label"].where(
+        prospects.loc[non_custom_mask, "Label"].notna() &
+        (prospects.loc[non_custom_mask, "Label"].astype(str).str.strip() != ""),
+        uwi_vals
+    )
+
+unnamed_mask = prospects["Label"].isna() & ~custom_mask_label
+if unnamed_mask.any():
+    ep_data = prospects.loc[unnamed_mask, "geometry"].apply(endpoint_of_geom)
+    valid_ep = ep_data.dropna()
+
+    if not valid_ep.empty:
+        ep_gdf = gpd.GeoDataFrame(
+            {"_pidx": valid_ep.index, "geometry": valid_ep.values},
+            crs=prospects.crs,
+        )
+
+        joined = gpd.sjoin(ep_gdf, grid_gdf[["Section", "geometry"]], how="left", predicate="within")
+
+        still_missing = joined["Section"].isna()
+        if still_missing.any():
+            missing_ep = ep_gdf.loc[ep_gdf["_pidx"].isin(joined.loc[still_missing, "_pidx"])]
+            if not missing_ep.empty:
+                fallback = gpd.sjoin(missing_ep, grid_gdf[["Section", "geometry"]], how="left", predicate="intersects")
+                fb_first = fallback.dropna(subset=["Section"]).groupby("_pidx").first()
+                for pidx, row in fb_first.iterrows():
+                    joined.loc[joined["_pidx"] == pidx, "Section"] = row["Section"]
+
+        valid_rows = joined.dropna(subset=["Section"])
+        for _, row in valid_rows.iterrows():
+            prospects.at[row["_pidx"], "Label"] = str(row["Section"]).strip()
+            prospects.at[row["_pidx"], "_label_is_section"] = True
+
+    section_labeled = prospects[prospects["_label_is_section"]]
+    dupe_labels = section_labeled["Label"].value_counts()
+    dupe_labels = dupe_labels[dupe_labels > 1].index
+
+    for section_name in dupe_labels:
+        idxs = section_labeled[section_labeled["Label"] == section_name].index
+        suffix_gen = _suffix_generator()
+        for pidx in idxs:
+            prospects.at[pidx, "Label"] = f"{section_name}-{next(suffix_gen)}"
 
 prospects["Label"] = prospects["Label"].fillna("")
 
-# -----------------------------
-# Analysis functions
-# -----------------------------
+# ==========================================================
+# Analyse prospects
+# ==========================================================
 def idw_for_column(hits, col, pros_index):
     valid = hits.loc[hits[col].notna() & hits["_w"].notna()]
     if valid.empty:
@@ -398,11 +495,13 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     pros = pros.copy()
     pros["_midpoint"] = pros.geometry.apply(midpoint_of_geom)
     pros["_buffer"] = pros.geometry.buffer(buffer_m, cap_style=2)
-    buffer_gdf = gpd.GeoDataFrame({"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs)
+
+    buffer_gdf = gpd.GeoDataFrame(
+        {"_pidx": pros.index, "geometry": pros["_buffer"]}, crs=pros.crs,
+    )
 
     midpt_gdf = prox[prox["_midpoint"].notna()].copy()
     midpt_gdf = midpt_gdf.set_geometry(gpd.GeoSeries(midpt_gdf["_midpoint"], crs=prox.crs))
-
     well_hits = gpd.sjoin(midpt_gdf, buffer_gdf, how="inner", predicate="within")
 
     px_mp = well_hits["index_right"].map(pros["_midpoint"])
@@ -410,14 +509,16 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     hit_y = well_hits["_midpoint"].apply(lambda pt: pt.y)
     px_x = px_mp.apply(lambda pt: pt.x if pt else np.nan)
     px_y = px_mp.apply(lambda pt: pt.y if pt else np.nan)
-
     well_hits["_dist"] = np.sqrt((hit_x - px_x) ** 2 + (hit_y - px_y) ** 2).replace(0, 1.0)
     well_hits["_w"] = 1.0 / (well_hits["_dist"] ** 2)
 
     idw_results = {col: idw_for_column(well_hits, col, pros.index) for col in WELL_COLS}
+
     proximal_count = well_hits.groupby("index_right").size().reindex(pros.index, fill_value=0)
-    proximal_uwis = well_hits.groupby("index_right")["UWI"].apply(lambda x: ", ".join(x.astype(str))).reindex(
-        pros.index, fill_value=""
+    proximal_uwis = (
+        well_hits.groupby("index_right")["UWI"]
+        .apply(lambda x: ", ".join(x.astype(str)))
+        .reindex(pros.index, fill_value="")
     )
 
     sum_results = {}
@@ -434,9 +535,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
 
     sec_join = gpd.sjoin(
         sections[["geometry", SECTION_OOIP_COL, SECTION_ROIP_COL]],
-        buffer_gdf,
-        how="inner",
-        predicate="intersects",
+        buffer_gdf, how="inner", predicate="intersects",
     )
     ooip_mean = sec_join.groupby("index_right")[SECTION_OOIP_COL].mean().reindex(pros.index)
     roip_mean = sec_join.groupby("index_right")[SECTION_ROIP_COL].mean().reindex(pros.index)
@@ -454,8 +553,7 @@ def analyze_prospects(pros, prox, sections, buffer_m):
     return out
 
 
-# compute metrics for prospects
-prospect_metrics = analyze_prospects(prospects, proximal_wells, grid_gdf, buffer_distance)
+prospect_metrics = analyze_prospects(prospects, proximal_wells, section_enriched, buffer_distance)
 for c in prospect_metrics.columns:
     prospects[c] = prospect_metrics[c].values
 
@@ -463,24 +561,36 @@ for col in ALL_METRIC_COLS:
     if col in prospects.columns:
         prospects[col] = prospects[col].replace([np.inf, -np.inf], np.nan)
 
-_tf_wgs = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
+# Coordinates
+_tf = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
 
-for prefix, geom_func in [("BH", endpoint_of_geom), ("Heel", startpoint_of_geom)]:
-    pts = prospects.geometry.apply(geom_func)
-    px = pts.apply(lambda pt: pt.x if pt else np.nan)
-    py = pts.apply(lambda pt: pt.y if pt else np.nan)
-    valid = px.notna()
+_endpoints = prospects.geometry.apply(endpoint_of_geom)
+_ep_x = _endpoints.apply(lambda pt: pt.x if pt else np.nan)
+_ep_y = _endpoints.apply(lambda pt: pt.y if pt else np.nan)
+valid_ep = _ep_x.notna()
+_lon_bh, _lat_bh = np.full(len(prospects), np.nan), np.full(len(prospects), np.nan)
+if valid_ep.any():
+    _lon_bh[valid_ep], _lat_bh[valid_ep] = _tf.transform(
+        _ep_x[valid_ep].values, _ep_y[valid_ep].values
+    )
+prospects["BH Latitude"] = np.round(_lat_bh, 6)
+prospects["BH Longitude"] = np.round(_lon_bh, 6)
 
-    lon_arr, lat_arr = np.full(len(prospects), np.nan), np.full(len(prospects), np.nan)
-    if valid.any():
-        lon_arr[valid], lat_arr[valid] = _tf_wgs.transform(px[valid].values, py[valid].values)
+_startpoints = prospects.geometry.apply(startpoint_of_geom)
+_sp_x = _startpoints.apply(lambda pt: pt.x if pt else np.nan)
+_sp_y = _startpoints.apply(lambda pt: pt.y if pt else np.nan)
+valid_sp = _sp_x.notna()
+_lon_heel, _lat_heel = np.full(len(prospects), np.nan), np.full(len(prospects), np.nan)
+if valid_sp.any():
+    _lon_heel[valid_sp], _lat_heel[valid_sp] = _tf.transform(
+        _sp_x[valid_sp].values, _sp_y[valid_sp].values
+    )
+prospects["Heel Latitude"] = np.round(_lat_heel, 6)
+prospects["Heel Longitude"] = np.round(_lon_heel, 6)
 
-    prospects[f"{prefix} Latitude"] = np.round(lat_arr, 6)
-    prospects[f"{prefix} Longitude"] = np.round(lon_arr, 6)
-
-# -----------------------------
-# Classification settings
-# -----------------------------
+# ==========================================================
+# Classification
+# ==========================================================
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 Classification")
 
@@ -490,14 +600,17 @@ cw_ip90 = st.sidebar.number_input("IP90 weight %", 0, 100, 33, key="cw_ip90")
 cw_sum = cw_eur + cw_1y + cw_ip90
 
 classification_ready = False
+eur_model = ip90_model = y1_model = None
+prod_threshold = resource_threshold = None
+field = pd.DataFrame()
 
 if cw_sum != 100:
-    st.sidebar.error(f"Weights sum to {cw_sum}% — must equal 100%")
+    st.sidebar.error(f"Weights sum to {cw_sum}%, must be 100%")
 else:
     prod_threshold = st.sidebar.slider("Productivity Z threshold (σ)", -1.0, 2.0, 0.0, 0.05, key="prod_thresh")
     resource_threshold = st.sidebar.slider("Resource Z threshold (σ)", -1.0, 2.0, 0.0, 0.05, key="res_thresh")
 
-    field = well_df.dropna(subset=[SECTION_ROIP_COL] + WELL_COLS).copy()
+    field = well_df.dropna(subset=[SECTION_ROIP_COL, "Norm EUR", "Norm 1Y Cuml", "Norm IP90"]).copy()
     field = field[field[SECTION_ROIP_COL] > 0]
 
     if len(field) >= 2:
@@ -512,15 +625,14 @@ else:
                 ("IP90", ip90_model, "Norm IP90"),
                 ("Y1", y1_model, "Norm 1Y Cuml"),
             ]:
-                preds = model.predict(field[SECTION_ROIP_COL].values.reshape(-1, 1))
-                field[f"{tag}_resid"] = field[src] - preds
+                field[f"{tag}_resid"] = field[src] - model.predict(field[SECTION_ROIP_COL].values.reshape(-1, 1))
                 resid_std[tag] = field[f"{tag}_resid"].std()
 
             field_roip_mean = field[SECTION_ROIP_COL].mean()
             field_roip_std = field[SECTION_ROIP_COL].std()
 
-            pros_cls = prospects.dropna(subset=[SECTION_ROIP_COL] + WELL_COLS).copy()
-            pros_cls = pros_cls[pros_cls[SECTION_ROIP_COL] > 0]
+            pros_cls = prospects.dropna(subset=[SECTION_ROIP_COL] + WELL_COLS)
+            pros_cls = pros_cls[pros_cls[SECTION_ROIP_COL] > 0].copy()
 
             if not pros_cls.empty:
                 roip_vals = pros_cls[SECTION_ROIP_COL].values.reshape(-1, 1)
@@ -533,33 +645,37 @@ else:
                     ("Z_IP90", "Norm IP90", "IP90_pred", resid_std["IP90"]),
                     ("Z_1Y", "Norm 1Y Cuml", "Y1_pred", resid_std["Y1"]),
                 ]:
-                    pros_cls[tag] = (pros_cls[src] - pros_cls[pred_col]) / std if std and std > 0 else 0.0
+                    pros_cls[tag] = (pros_cls[src] - pros_cls[pred_col]) / std if std > 0 else 0
 
-                pros_cls["Productivity_Z"] = (cw_eur / 100) * pros_cls["Z_EUR"] + (cw_1y / 100) * pros_cls["Z_1Y"] + (cw_ip90 / 100) * pros_cls["Z_IP90"]
-                pros_cls["Resource_Z"] = (pros_cls[SECTION_ROIP_COL] - field_roip_mean) / field_roip_std if field_roip_std and field_roip_std > 0 else 0.0
-
+                pros_cls["Productivity_Z"] = (
+                    (cw_eur / 100) * pros_cls["Z_EUR"] +
+                    (cw_1y / 100) * pros_cls["Z_1Y"] +
+                    (cw_ip90 / 100) * pros_cls["Z_IP90"]
+                )
+                pros_cls["Resource_Z"] = (
+                    (pros_cls[SECTION_ROIP_COL] - field_roip_mean) / field_roip_std
+                    if field_roip_std > 0 else 0.0
+                )
                 pros_cls["Classification"] = pros_cls.apply(
-                    lambda r: classify_quadrant(r["Productivity_Z"], r["Resource_Z"], prod_threshold, resource_threshold),
-                    axis=1
+                    lambda r: classify_quadrant(
+                        r["Productivity_Z"], r["Resource_Z"], prod_threshold, resource_threshold
+                    ),
+                    axis=1,
                 )
 
                 for col in ["Classification", "Productivity_Z", "Resource_Z", "Z_EUR", "Z_IP90", "Z_1Y"]:
-                    if col not in prospects.columns:
-                        prospects[col] = np.nan
-                    prospects.loc[pros_cls.index, col] = pros_cls[col].values
+                    prospects[col] = np.nan
+                    prospects.loc[pros_cls.index, col] = pros_cls[col]
 
                 classification_ready = True
-    else:
-        st.sidebar.warning("Need ≥2 wells with valid ROIP & metrics to classify.")
 
-# -----------------------------
+# ==========================================================
 # Filters
-# -----------------------------
+# ==========================================================
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔍 Filters")
 
-p = prospects.copy()
-
+p = prospects
 has_proximal = p["Proximal_Count"] > 0
 filter_mask = has_proximal.copy()
 
@@ -575,362 +691,491 @@ for col in ALL_METRIC_COLS:
 p["_passes_filter"] = filter_mask
 p["_no_proximal"] = ~has_proximal
 
-n_total = len(p)
-n_passing = int(filter_mask.sum())
+n_total, n_passing = len(p), int(filter_mask.sum())
+n_no_proximal = int((~has_proximal).sum())
+n_custom = int(p["_is_custom"].sum())
 
+# ==========================================================
+# Prepare display data
+# ==========================================================
 transformer_to_4326 = Transformer.from_crs("EPSG:26913", "EPSG:4326", always_xy=True)
-
-p["_line_color"] = "red"
-if classification_ready and "Classification" in p.columns:
-    p["_line_color"] = p["Classification"].map(COLOR_MAP_CLASS).fillna("red")
-
-if "Classification" in p.columns:
-    custom_no_cls = p["_is_custom"] & p["Classification"].isna()
-else:
-    custom_no_cls = p["_is_custom"].copy()
-p.loc[custom_no_cls, "_line_color"] = "#ff00ff"
+existing_display = proximal_wells.to_crs(4326)
 
 
 def _build_tooltip_html(row):
     parts = []
-    if bool(row.get("_is_custom", False)):
+    is_custom = row.get("_is_custom", False)
+    if is_custom:
         parts.append("✏️ <b>CUSTOM WELL</b>")
-
     label = row.get("Label", "")
     if label:
-        tag = "Section" if row.get("_label_is_section", False) else "Label"
-        parts.append(f"<b>{tag}:</b> {label}")
-
-    parts.append(f"Proximal Wells: {row.get('Proximal_Count', '—')}")
-
+        if is_custom:
+            parts.append(f"<b>Label:</b> {label}")
+        else:
+            tag = "Section" if row.get("_label_is_section", False) else "UWI"
+            parts.append(f"<b>{tag}:</b> {label}")
+    pc = row.get("Proximal_Count", "—")
+    parts.append(f"Proximal Wells: {pc}")
     for col in ALL_METRIC_COLS:
         if col in row.index and pd.notna(row[col]):
             parts.append(f"{col}: {fmt_val(col, row[col])}")
-
     cls = row.get("Classification", None)
     if pd.notna(cls):
         parts.append(f"<b>Class:</b> {cls}")
-
     pz = row.get("Productivity_Z", None)
     if pd.notna(pz):
         parts.append(f"Prod Z: {pz:.2f}")
-
     rz = row.get("Resource_Z", None)
     if pd.notna(rz):
         parts.append(f"Resource Z: {rz:.2f}")
-
     return "<br>".join(parts) if parts else "Prospect"
 
 
 p["_tooltip"] = p.apply(_build_tooltip_html, axis=1)
+
+has_classification = classification_ready and "Classification" in p.columns
+
+if has_classification:
+    p["_line_color"] = p["Classification"].map(COLOR_MAP_CLASS).fillna("red")
+else:
+    p["_line_color"] = "red"
+
+custom_no_cls = p["_is_custom"] & (
+    (~p["Classification"].notna()) if "Classification" in p.columns else True
+)
+p.loc[custom_no_cls, "_line_color"] = "#ff00ff"
+
 buffer_geoms = p.geometry.buffer(buffer_distance, cap_style=2)
+buffer_gdf = gpd.GeoDataFrame(
+    {
+        "_passes_filter": p["_passes_filter"].values,
+        "_no_proximal": p["_no_proximal"].values,
+        "_is_custom": p["_is_custom"].values,
+        "geometry": buffer_geoms,
+    },
+    crs=p.crs
+).to_crs(4326)
 
-p_lines_4326 = gpd.GeoDataFrame({
-    "_tooltip": p["_tooltip"].values,
-    "_line_color": p["_line_color"].values,
-    "_passes_filter": p["_passes_filter"].values,
-    "_is_custom": p["_is_custom"].values,
-    "geometry": p.geometry,
-}, crs=p.crs).to_crs(4326)
+p_lines_4326 = gpd.GeoDataFrame(
+    {
+        "_tooltip": p["_tooltip"].values,
+        "_line_color": p["_line_color"].values,
+        "_passes_filter": p["_passes_filter"].values,
+        "_is_custom": p["_is_custom"].values,
+        "geometry": p.geometry,
+    },
+    crs=p.crs
+).to_crs(4326)
 
-buffer_gdf_display = gpd.GeoDataFrame({
-    "_passes_filter": p["_passes_filter"].values,
-    "_no_proximal": p["_no_proximal"].values,
-    "_is_custom": p["_is_custom"].values,
-    "geometry": buffer_geoms,
-}, crs=p.crs).to_crs(4326)
+# ==========================================================
+# Title
+# ==========================================================
+st.title("🛢️ Inventory Classifier")
+st.caption(
+    f"**{n_passing}** / {n_total} prospects pass filters · "
+    f"Buffer: {buffer_distance}m"
+    + (f" · ✏️ {n_custom} custom well(s)" if n_custom else "")
+)
 
-inv_4326 = inv_gdf.to_crs(4326)
-
-# Map center
+# ==========================================================
+# MAP — no Draw tool, no returned events
+# ==========================================================
 bounds = p.total_bounds
 cx, cy = (bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2
 clon, clat = transformer_to_4326.transform(cx, cy)
 
 
-def safe_geojson_obj(gdf, simplify_tol=30):
-    """Return a GeoJSON dict (not string)."""
-    try:
-        gdf = gdf.copy()
-        if simplify_tol is not None:
-            gdf["geometry"] = gdf.geometry.simplify(simplify_tol, preserve_topology=True)
-        gj = gdf.to_json()
-        import json
-        return json.loads(gj)
-    except Exception:
-        return None
-
-
 @st.fragment
 def render_map():
-    payload = {
-        "center": [float(clat), float(clon)],
-        "lines_geo": safe_geojson_obj(_lines_gdf.to_crs(4326), 30),
-        "points_geo": safe_geojson_obj(_points_gdf.to_crs(4326), 0),
-        "inv_geo": safe_geojson_obj(inv_4326, 60),
-        "land_geo": safe_geojson_obj(land_gdf.to_crs(4326), 100),
-        "units_geo": safe_geojson_obj(units_gdf.to_crs(4326), 50),
-        "section_geo": safe_geojson_obj(section_enriched_4326, 80),
-        "buffers_geo": safe_geojson_obj(buffer_gdf_display, None),
-        "prospects_geo": safe_geojson_obj(p_lines_4326, None),
+    m = folium.Map(
+        location=[clat, clon],
+        zoom_start=11,
+        tiles="CartoDB positron",
+        prefer_canvas=True,
+    )
+    MiniMap(toggle_display=True, position="bottomleft").add_to(m)
+
+    # ── Bakken Land ──
+    land_fg = folium.FeatureGroup(name="Bakken Land", show=True)
+    folium.GeoJson(
+        land_json,
+        style_function=lambda _: {"fillColor": "#fff9c4", "color": "#fff9c4", "weight": 0.5, "fillOpacity": 0.2},
+    ).add_to(land_fg)
+    land_fg.add_to(m)
+
+    # ── Units ──
+    units_fg = folium.FeatureGroup(name="Units", show=True)
+    folium.GeoJson(
+        units_json,
+        style_function=lambda _: {"color": "black", "weight": 2, "fillOpacity": 0, "interactive": False},
+    ).add_to(units_fg)
+    units_fg.add_to(m)
+
+    # ── Section Grid ──
+    if section_gradient != "None" and section_gradient in section_4326.columns:
+        grad_vals = section_4326[section_gradient].dropna()
+        if not grad_vals.empty:
+            colormap = cm.LinearColormap(
+                ["#f7fcf5", "#74c476", "#00441b"],
+                vmin=float(grad_vals.min()),
+                vmax=float(grad_vals.max()),
+            ).to_step(n=7)
+            colormap.caption = section_gradient
+            m.add_child(colormap)
+
+            sec_style = lambda feat, _col=section_gradient, _cm=colormap: (
+                {
+                    "fillColor": _cm(feat["properties"].get(_col)),
+                    "fillOpacity": 0.45,
+                    "color": "white",
+                    "weight": 0.3,
+                }
+                if feat["properties"].get(_col) is not None
+                and not (
+                    isinstance(feat["properties"].get(_col), float)
+                    and np.isnan(feat["properties"].get(_col))
+                )
+                else NULL_STYLE
+            )
+        else:
+            sec_style = lambda _: NULL_STYLE
+    else:
+        sec_style = lambda _: NULL_STYLE
+
+    sec_tip_fields = [c for c in section_4326.columns if c != "geometry"]
+    section_fg = folium.FeatureGroup(name="Section Grid", show=(section_gradient != "None"))
+    folium.GeoJson(
+        section_4326.to_json(),
+        style_function=sec_style,
+        highlight_function=lambda _: {"weight": 2, "color": "black", "fillOpacity": 0.5},
+        tooltip=folium.GeoJsonTooltip(
+            fields=sec_tip_fields,
+            aliases=[f"{f}:" for f in sec_tip_fields],
+            localize=True,
+            sticky=True,
+            style=TOOLTIP_STYLE,
+        ),
+    ).add_to(section_fg)
+    section_fg.add_to(m)
+
+    # ── Existing Wells ──
+    well_fg = folium.FeatureGroup(name="Existing Wells")
+    line_wells = existing_display[existing_display.geometry.type != "Point"]
+    point_wells = existing_display[existing_display.geometry.type == "Point"]
+    well_tip_fields = [c for c in existing_display.columns if c not in ("geometry", "_midpoint")]
+
+    if not line_wells.empty:
+        folium.GeoJson(
+            line_wells[well_tip_fields + ["geometry"]].to_json(),
+            style_function=lambda _: {"color": "transparent", "weight": 15, "opacity": 0},
+            highlight_function=lambda _: {"weight": 15, "color": "#555", "opacity": 0.3},
+            tooltip=folium.GeoJsonTooltip(
+                fields=well_tip_fields,
+                aliases=[f"{f}:" for f in well_tip_fields],
+                localize=True,
+                sticky=True,
+                style=TOOLTIP_STYLE,
+            ),
+        ).add_to(well_fg)
+
+        line_clean = line_wells.drop(columns=["_midpoint"], errors="ignore")
+        for c in line_clean.columns:
+            if c != "geometry" and line_clean[c].dtype == object:
+                line_clean[c] = line_clean[c].astype(str)
+        folium.GeoJson(
+            line_clean.to_json(),
+            style_function=lambda _: {"color": "black", "weight": 0.5, "opacity": 0.8},
+        ).add_to(well_fg)
+
+        for _, row in line_wells.iterrows():
+            ep = endpoint_of_geom(row.geometry)
+            if ep:
+                folium.CircleMarker(
+                    [ep.y, ep.x],
+                    radius=1,
+                    color="black",
+                    fill=True,
+                    fill_color="black",
+                    fill_opacity=0.8,
+                    weight=1,
+                ).add_to(well_fg)
+
+    for _, row in point_wells.iterrows():
+        tip = "<br>".join(
+            f"<b>{c}:</b> {fmt_val(c, row[c]) if isinstance(row[c], (int, float)) else row[c]}"
+            for c in well_tip_fields if c in row.index and pd.notna(row[c])
+        )
+        folium.CircleMarker(
+            [row.geometry.y, row.geometry.x],
+            radius=2,
+            color="black",
+            fill=True,
+            fill_color="black",
+            fill_opacity=0.9,
+            weight=1,
+            tooltip=folium.Tooltip(tip, sticky=True, style=TOOLTIP_STYLE),
+        ).add_to(well_fg)
+    well_fg.add_to(m)
+
+    # ── Prospect Buffers ──
+    buf_fg = folium.FeatureGroup(name="Prospect Buffers")
+    buffer_gdf["_bstyle"] = "fail"
+    buffer_gdf.loc[buffer_gdf["_passes_filter"], "_bstyle"] = "pass"
+    buffer_gdf.loc[buffer_gdf["_no_proximal"], "_bstyle"] = "noprox"
+    buffer_gdf.loc[buffer_gdf["_is_custom"], "_bstyle"] = "custom"
+
+    _BSTYLES = {
+        "pass":   {"fillOpacity": 0, "color": "#000", "weight": 1.2, "opacity": 0.6, "dashArray": "6 4"},
+        "fail":   {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.25, "dashArray": "6 4"},
+        "noprox": {"fillOpacity": 0, "color": "#000", "weight": 0.8, "opacity": 0.3, "dashArray": "4 6"},
+        "custom": {"fillOpacity": 0.04, "fillColor": "#ff00ff", "color": "#ff00ff", "weight": 1.5, "opacity": 0.7, "dashArray": "4 4"},
     }
 
-    import json
-    html = f"""
-    <!doctype html>
-    <html>
-    <head>
-      <meta charset="utf-8"/>
-      <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-      <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
-      <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-      <style>
-        #map {{ width: 100%; height: 750px; border-radius: 8px; overflow: hidden; }}
-      </style>
-    </head>
-    <body>
-      <div id="map"></div>
-      <script>
-        const payload = {json.dumps(payload)};
+    folium.GeoJson(
+        buffer_gdf[["_bstyle", "geometry"]].to_json(),
+        style_function=lambda feat: _BSTYLES.get(
+            feat["properties"].get("_bstyle", "fail"), _BSTYLES["fail"]
+        ),
+    ).add_to(buf_fg)
+    buf_fg.add_to(m)
 
-        const map = L.map('map', {{ zoomControl: true }});
-        const center = payload.center;
+    # ── Prospect Wells ──
+    prospect_fg = folium.FeatureGroup(name="Prospect Wells", show=True)
 
-        L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}.png', {{
-          attribution: '&copy; OpenStreetMap contributors'
-        }}).addTo(map);
+    for _, row in p_lines_4326.iterrows():
+        lc = row["_line_color"]
+        tip = row["_tooltip"]
+        is_custom = row.get("_is_custom", False)
+        line_weight = 5 if is_custom else 3
 
-        map.setView(center, 11);
+        folium.GeoJson(
+            row.geometry.__geo_interface__,
+            style_function=lambda _, _lc=lc, _w=line_weight: {"color": _lc, "weight": _w, "opacity": 0.9},
+            highlight_function=lambda _: {"weight": 7, "color": "#ff4444"},
+            tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
+        ).add_to(prospect_fg)
 
-        const layers = {{
-          existingWells: L.layerGroup(),
-          inventory: L.layerGroup(),
-          land: L.layerGroup(),
-          units: L.layerGroup(),
-          sectionGrid: L.layerGroup(),
-          buffers: L.layerGroup(),
-          prospects: L.layerGroup(),
-        }};
+        if is_custom:
+            coords = list(row.geometry.coords)
+            if len(coords) >= 2:
+                folium.RegularPolygonMarker(
+                    [coords[0][1], coords[0][0]],
+                    number_of_sides=4,
+                    radius=6,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=2,
+                    rotation=45,
+                    tooltip=folium.Tooltip(f"✏️ Heel<br>{tip}", sticky=True, style="font-size:12px"),
+                ).add_to(prospect_fg)
+                folium.RegularPolygonMarker(
+                    [coords[-1][1], coords[-1][0]],
+                    number_of_sides=5,
+                    radius=8,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=2,
+                    tooltip=folium.Tooltip(f"✏️ Toe<br>{tip}", sticky=True, style="font-size:12px"),
+                ).add_to(prospect_fg)
+        else:
+            ep = endpoint_of_geom(row.geometry)
+            if ep:
+                folium.CircleMarker(
+                    [ep.y, ep.x],
+                    radius=3,
+                    color=lc,
+                    fill=True,
+                    fill_color=lc,
+                    fill_opacity=0.9,
+                    weight=1,
+                    tooltip=folium.Tooltip(tip, sticky=True, style="font-size:12px"),
+                ).add_to(prospect_fg)
 
-        function addGeojsonToLayer(geo, layer, styleFn, onEachFeature=null) {{
-          if (!geo) return;
-          const gj = L.geoJSON(geo, {{
-            style: styleFn,
-            onEachFeature: onEachFeature
-          }});
-          gj.addTo(layer);
-        }}
+    prospect_fg.add_to(m)
+    folium.LayerControl(collapsed=True).add_to(m)
 
-        // Existing wells
-        addGeojsonToLayer(
-          payload.lines_geo,
-          layers.existingWells,
-          function() {{ return {{ color: '#d62728', weight: 2, opacity: 0.9 }}; }}
-        );
-        addGeojsonToLayer(
-          payload.points_geo,
-          layers.existingWells,
-          function() {{ return {{ color: '#1f77b4', weight: 1, opacity: 0.95, fillOpacity: 0.9 }}; }}
-        );
+    # No draw tool + no returned events
+    _ = st_folium(
+        m,
+        use_container_width=True,
+        height=800,
+        returned_objects=[],
+    )
 
-        // Inventory
-        addGeojsonToLayer(
-          payload.inv_geo,
-          layers.inventory,
-          function() {{ return {{ color: '#999', weight: 1, fillOpacity: 0.06 }}; }}
-        );
-
-        // Land
-        addGeojsonToLayer(
-          payload.land_geo,
-          layers.land,
-          function() {{ return {{ fillColor: '#fff9c4', color: '#fff9c4', weight: 0.5, fillOpacity: 0.2 }}; }}
-        );
-
-        // Units
-        addGeojsonToLayer(
-          payload.units_geo,
-          layers.units,
-          function() {{ return {{ color: 'black', weight: 2, fillOpacity: 0 }}; }}
-        );
-
-        // Section grid
-        addGeojsonToLayer(
-          payload.section_geo,
-          layers.sectionGrid,
-          function() {{ return {{ fillOpacity: 0, color: '#999', weight: 0.3 }}; }}
-        );
-
-        // Buffers (dashed)
-        addGeojsonToLayer(
-          payload.buffers_geo,
-          layers.buffers,
-          function() {{
-            return {{ color: '#000', weight: 1, opacity: 0.4, dashArray: '5,5', fillOpacity: 0 }};
-          }}
-        );
-
-        // Prospects
-        function prospectsStyle(feature) {{
-          const p = feature.properties || {{}};
-          return {{
-            color: p._line_color || 'red',
-            weight: (p._is_custom ? 5 : 3),
-            opacity: 0.9
-          }};
-        }}
-
-        addGeojsonToLayer(
-          payload.prospects_geo,
-          layers.prospects,
-          prospectsStyle,
-          function(feature, layer) {{
-            const p = feature.properties || {{}};
-            if (p._tooltip) {{
-              layer.bindTooltip(p._tooltip, {{ sticky: true, direction: 'auto' }});
-            }}
-          }}
-        );
-
-        // Add defaults (match your earlier behavior)
-        layers.existingWells.addTo(map);
-        layers.inventory.addTo(map);
-        layers.land.addTo(map);
-        layers.units.addTo(map);
-        layers.sectionGrid.addTo(map); // set off here if you want it hidden by default
-        layers.buffers.addTo(map);     // set off here if you want it hidden by default
-        layers.prospects.addTo(map);
-
-        const overlayMaps = {{
-          "Existing Wells": layers.existingWells,
-          "Inventory": layers.inventory,
-          "Land": layers.land,
-          "Units": layers.units,
-          "Section Grid": layers.sectionGrid,
-          "Buffers": layers.buffers,
-          "Prospects": layers.prospects,
-        }};
-
-        L.control.layers(null, overlayMaps, {{ collapsed: false }}).addTo(map);
-      </script>
-    </body>
-    </html>
-    """
-
-    components.html(html, height=800, scrolling=False)
-
-
-# -----------------------------
-# Page Title + Metrics
-# -----------------------------
-st.title("🛢️ Inventory Classifier")
-
-col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-col_m1.metric("Total Prospects", n_total)
-col_m2.metric("Passing Filters", n_passing)
-col_m3.metric("Buffer Distance", f"{buffer_distance}m")
-col_m4.metric(
-    "Classified",
-    int(prospects["Classification"].notna().sum()) if "Classification" in prospects.columns else 0
-)
 
 render_map()
 
-# -----------------------------
-# Classification charts
-# -----------------------------
-if classification_ready:
+# ==========================================================
+# Custom Well Results
+# ==========================================================
+custom_prospects = p[p["_is_custom"]].copy()
+if not custom_prospects.empty:
     st.markdown("---")
-    st.subheader("Classification Distribution")
-    cls_counts = prospects["Classification"].dropna().value_counts()
-    if not cls_counts.empty:
-        fig = go.Figure(go.Bar(
-            x=cls_counts.index,
-            y=cls_counts.values,
-            marker_color=[COLOR_MAP_CLASS.get(c, "#888") for c in cls_counts.index],
-            text=cls_counts.values,
-            textposition="auto",
-        ))
-        fig.update_layout(
-            xaxis_title="Classification",
-            yaxis_title="Count",
-            plot_bgcolor="rgba(0,0,0,0)",
-            paper_bgcolor="rgba(0,0,0,0)",
-            height=350,
-            margin=dict(l=40, r=40, t=20, b=60),
-            font=dict(size=12),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("✏️ Custom Well Results")
 
-    if "Productivity_Z" in prospects.columns and "Resource_Z" in prospects.columns:
-        scatter_df = prospects.dropna(subset=["Productivity_Z", "Resource_Z"]).copy()
-        if not scatter_df.empty:
-            st.subheader("Productivity vs Resource")
-            fig2 = go.Figure()
-            for cls_name, color in COLOR_MAP_CLASS.items():
-                subset = scatter_df[scatter_df.get("Classification") == cls_name]
-                if not subset.empty:
-                    fig2.add_trace(go.Scatter(
-                        x=subset["Resource_Z"],
-                        y=subset["Productivity_Z"],
-                        mode="markers",
-                        name=cls_name,
-                        marker=dict(color=color, size=10, line=dict(width=1, color="#333")),
-                        text=subset["Label"],
-                        hovertemplate="<b>%{text}</b><br>Resource Z: %{x:.2f}<br>Prod Z: %{y:.2f}<extra></extra>",
-                    ))
-            fig2.add_hline(y=prod_threshold, line_dash="dash", line_color="#666", opacity=0.6)
-            fig2.add_vline(x=resource_threshold, line_dash="dash", line_color="#666", opacity=0.6)
-            fig2.update_layout(
-                xaxis_title="Resource Z (σ)",
-                yaxis_title="Productivity Z (σ)",
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                height=450,
-                margin=dict(l=40, r=40, t=20, b=60),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    for _, cw_row in custom_prospects.iterrows():
+        label = cw_row.get("Label", "Custom Well")
+        cls = cw_row.get("Classification", None)
+        cls_str = cls if pd.notna(cls) else "Unclassified"
+        cls_color = COLOR_MAP_CLASS.get(cls, "#888") if pd.notna(cls) else "#888"
+
+        with st.expander(f"**{label}** — {cls_str}", expanded=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown(
+                    f"Heel: `{cw_row.get('Heel Latitude', '—')}, {cw_row.get('Heel Longitude', '—')}`  \n"
+                    f"Toe: `{cw_row.get('BH Latitude', '—')}, {cw_row.get('BH Longitude', '—')}`  \n"
+                    f"Proximal Wells: **{int(cw_row.get('Proximal_Count', 0))}**"
+                )
+            with c2:
+                for col in ALL_METRIC_COLS:
+                    val = cw_row.get(col, np.nan)
+                    prefix = "Σ " if col in SUM_COLS else ""
+                    st.markdown(f"{prefix}{col}: **{fmt_val(col, val)}**")
+            with c3:
+                st.markdown(
+                    f"<span style='color:{cls_color};font-size:1.2em;font-weight:bold'>"
+                    f"{cls_str}</span>",
+                    unsafe_allow_html=True
+                )
+                pz = cw_row.get("Productivity_Z", np.nan)
+                rz = cw_row.get("Resource_Z", np.nan)
+                if pd.notna(pz):
+                    st.markdown(f"Prod Z: **{pz:.2f}σ**")
+                if pd.notna(rz):
+                    st.markdown(f"Resource Z: **{rz:.2f}σ**")
+
+# ==========================================================
+# Classification Results
+# ==========================================================
+if classification_ready and "Classification" in p.columns:
+    st.markdown("---")
+    st.header("📐 Classification — 4-Quadrant View")
+
+    pros_chart = p[p["_passes_filter"] & p["Classification"].notna()]
+
+    if not pros_chart.empty:
+        col1, col2 = st.columns(2)
+        x_range = np.linspace(field[SECTION_ROIP_COL].min(), field[SECTION_ROIP_COL].max(), 100)
+
+        for y_col, model, target_col in [
+            ("Norm EUR", eur_model, col1),
+            ("Norm 1Y Cuml", y1_model, col2),
+            ("Norm IP90", ip90_model, col1),
+        ]:
+            with target_col:
+                chart_df = pros_chart.copy()
+                chart_df["_symbol"] = chart_df["_is_custom"].map({True: "Custom", False: "Prospect"})
+
+                fig = px.scatter(
+                    chart_df, x=SECTION_ROIP_COL, y=y_col,
+                    color="Classification", color_discrete_map=COLOR_MAP_CLASS,
+                    symbol="_symbol",
+                    symbol_map={"Prospect": "circle", "Custom": "star"},
+                    hover_data=["Label"], title=f"{y_col} vs {SECTION_ROIP_COL}",
+                )
+                fig.add_trace(go.Scatter(
+                    x=field[SECTION_ROIP_COL], y=field[y_col],
+                    mode="markers", name="Field UWIs",
+                    marker=dict(color="lightgrey", size=4, opacity=0.5),
+                ))
+                fig.add_trace(go.Scatter(
+                    x=x_range, y=model.predict(x_range.reshape(-1, 1)),
+                    mode="lines", name="Trend", line=dict(color="black", dash="dash"),
+                ))
+                for trace in fig.data:
+                    if hasattr(trace, 'marker') and getattr(trace.marker, 'symbol', None) == 'star':
+                        trace.marker.size = 14
+                st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            chart_df = pros_chart.copy()
+            chart_df["_symbol"] = chart_df["_is_custom"].map({True: "Custom", False: "Prospect"})
+
+            fig_quad = px.scatter(
+                chart_df, x="Resource_Z", y="Productivity_Z",
+                color="Classification", color_discrete_map=COLOR_MAP_CLASS,
+                symbol="_symbol",
+                symbol_map={"Prospect": "circle", "Custom": "star"},
+                hover_data=["Label"],
+                title="Productivity Z vs Resource Z",
+                labels={
+                    "Resource_Z": f"Resource Z ({SECTION_ROIP_COL})",
+                    "Productivity_Z": "Productivity Z (Composite)"
+                },
             )
-            st.plotly_chart(fig2, use_container_width=True)
 
-# -----------------------------
-# Results table
-# -----------------------------
-st.markdown("---")
-st.header("📋 Prospect Results")
+            for trace in fig_quad.data:
+                if hasattr(trace, 'marker') and getattr(trace.marker, 'symbol', None) == 'star':
+                    trace.marker.size = 14
 
-p_display = p[p["_passes_filter"]].copy()
-if p_display.empty:
-    st.info("No prospects pass current filters.")
-else:
-    table_cols = [
-        "Label", "_is_custom",
-        "Heel Latitude", "Heel Longitude", "BH Latitude", "BH Longitude",
-        SECTION_OOIP_COL, SECTION_ROIP_COL,
-        "Norm EUR", "Norm 1Y Cuml", "Norm IP90", "WF", "FOOZ",
-        "Productivity_Z", "Resource_Z", "Classification",
-    ]
-    table_cols = [c for c in table_cols if c in p_display.columns]
+            rx_min = min(pros_chart["Resource_Z"].min(), -2) - 0.5
+            rx_max = max(pros_chart["Resource_Z"].max(), 2) + 0.5
+            ry_min = min(pros_chart["Productivity_Z"].min(), -2) - 0.5
+            ry_max = max(pros_chart["Productivity_Z"].max(), 2) + 0.5
 
-    df = p_display[table_cols].sort_values(
-        "Proximal_Count" if "Proximal_Count" in p_display.columns else table_cols[0],
-        ascending=False
-    ).reset_index(drop=True)
+            for rect in [
+                dict(x0=resource_threshold, x1=rx_max, y0=prod_threshold, y1=ry_max,
+                     fillcolor=COLOR_MAP_CLASS["High Prod / High Resource"], opacity=0.07),
+                dict(x0=resource_threshold, x1=rx_max, y0=ry_min, y1=prod_threshold,
+                     fillcolor=COLOR_MAP_CLASS["Low Prod / High Resource"], opacity=0.07),
+                dict(x0=rx_min, x1=resource_threshold, y0=prod_threshold, y1=ry_max,
+                     fillcolor=COLOR_MAP_CLASS["High Prod / Low Resource"], opacity=0.07),
+                dict(x0=rx_min, x1=resource_threshold, y0=ry_min, y1=prod_threshold,
+                     fillcolor=COLOR_MAP_CLASS["Low Prod / Low Resource"], opacity=0.07),
+            ]:
+                fig_quad.add_shape(
+                    type="rect",
+                    xref="x", yref="y",
+                    layer="below",
+                    line=dict(width=0),
+                    **rect
+                )
 
-    df.rename(columns={"_is_custom": "Custom Well"}, inplace=True)
+            fig_quad.add_hline(y=prod_threshold, line_dash="dot", line_color="grey",
+                               annotation_text=f"Prod σ = {prod_threshold}")
+            fig_quad.add_vline(x=resource_threshold, line_dash="dot", line_color="grey",
+                               annotation_text=f"Resource σ = {resource_threshold}")
+            fig_quad.add_hline(y=0, line_dash="dash", line_color="black", line_width=0.5)
+            fig_quad.add_vline(x=0, line_dash="dash", line_color="black", line_width=0.5)
 
-    st.dataframe(df, use_container_width=True, height=400)
-    st.download_button(
-        "📥 Download CSV",
-        data=df.to_csv(index=False),
-        file_name="prospects_classified.csv",
-        mime="text/csv",
-    )
+            st.plotly_chart(fig_quad, use_container_width=True)
 
-no_prox = p[p["_no_proximal"]].copy()
+        table_cols = [
+            "Label", "_is_custom",
+            "Heel Latitude", "Heel Longitude", "BH Latitude", "BH Longitude",
+            SECTION_OOIP_COL, SECTION_ROIP_COL,
+            "Norm EUR", "Norm 1Y Cuml", "Norm IP90",
+        ] + SUM_COLS + [
+            "Z_EUR", "Z_IP90", "Z_1Y", "Productivity_Z", "Resource_Z", "Classification"
+        ]
+        table_cols = [c for c in table_cols if c in pros_chart.columns]
+
+        cls_display = pros_chart[table_cols].sort_values(
+            "Productivity_Z", ascending=False
+        ).reset_index(drop=True)
+        cls_display.rename(columns={"_is_custom": "Custom Well"}, inplace=True)
+        st.dataframe(cls_display, use_container_width=True)
+        st.download_button(
+            "📥 Download CSV",
+            data=cls_display.to_csv(index=False),
+            file_name="classified_prospects.csv",
+            mime="text/csv",
+        )
+
+# No-proximal
+no_prox = p[p["_no_proximal"]]
 if not no_prox.empty:
     with st.expander(f"⚠️ {len(no_prox)} prospects with no proximal wells within {buffer_distance}m"):
-        show_cols = [c for c in ["Label", "_prospect_type", "_is_custom", "Heel Latitude", "Heel Longitude", "BH Latitude", "BH Longitude"] if c in no_prox.columns]
         st.dataframe(
-            no_prox[show_cols].rename(columns={"_prospect_type": "Type", "_is_custom": "Custom Well"}).reset_index(drop=True),
+            no_prox[["Label", "_prospect_type", "_is_custom",
+                     "Heel Latitude", "Heel Longitude",
+                     "BH Latitude", "BH Longitude"]].rename(
+                columns={"_prospect_type": "Type", "_is_custom": "Custom Well"}
+            ).reset_index(drop=True),
             use_container_width=True,
         )
